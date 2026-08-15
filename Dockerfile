@@ -10,15 +10,26 @@ WORKDIR /app
 
 ARG OPENCLAW_GIT_REF=main
 
-RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git .
+# Clone and immediately remove the .git history to save space
+RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git . \
+    && rm -rf .git
 
-RUN pnpm install --frozen-lockfile
-RUN pnpm build
+# Install, build, and prune devDependencies & pnpm cache in ONE layer to prevent disk exhaustion
+RUN pnpm install --frozen-lockfile \
+    && pnpm build \
+    && pnpm prune --prod \
+    && pnpm store prune
 
 ENV OPENCLAW_PREFER_PNPM=1
-RUN pnpm ui:install && pnpm ui:build
 
-FROM nikolaik/python-nodejs:python3.12-nodejs22-bookworm
+# Install UI, build, and aggressively purge UI dependencies and cache
+RUN pnpm ui:install \
+    && pnpm ui:build \
+    && rm -rf ui/node_modules \
+    && pnpm store prune
+
+# Switch to the -slim variant of the runtime image (saves ~500MB+)
+FROM nikolaik/python-nodejs:python3.12-nodejs22-slim
 
 ENV NODE_ENV=production
 ENV PORT=6658
@@ -37,6 +48,7 @@ RUN set -eux; \
 	rm -f /tmp/tigrisfs.deb; \
 	rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
+# Copy only the pruned production files from the builder
 COPY --from=openclaw-build /app /openclaw
 
 RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/index.js "$@"' > /usr/local/bin/openclaw \
