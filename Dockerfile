@@ -1,67 +1,41 @@
-FROM node:22-bookworm AS openclaw-build
+# Cloud Claw — Cloudflare Container Dockerfile
+#
+# CHANGED: Replaced the ~19-minute local OpenClaw compile (FROM node:22-bookworm AS openclaw-build
+# → git clone → pnpm install → pnpm build → pnpm ui:build) with the official prebuilt slim image.
+# The official GHCR image is the recommended route when you don't want to build locally.
+#
+# Architecture:
+#   ghcr.io/openclaw/openclaw:slim  ← official prebuilt (~no compile time)
+#   + TigrisFS FUSE mount layer     ← S3-compatible workspace persistence
+#   + /entrypoint.sh                ← Cloud Claw startup/config orchestration
+#   + port 6658                     ← Cloudflare Container compatible
 
-# Install Bun (build script dependency)
-RUN curl -fsSL https://bun.sh/install | bash
-ENV PATH="/root/.bun/bin:${PATH}"
-
-RUN corepack enable
-
-WORKDIR /app
-
-ARG OPENCLAW_GIT_REF=main
-
-# Clone and immediately remove the .git history to save space
-RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git . \
-    && rm -rf .git
-
-# Install, build, and prune devDependencies & pnpm cache in ONE layer to prevent disk exhaustion
-RUN pnpm install --frozen-lockfile \
-    && pnpm build \
-    && pnpm prune --prod \
-    && pnpm store prune
-
-ENV OPENCLAW_PREFER_PNPM=1
-
-# Install UI, build, and aggressively purge UI dependencies and cache
-RUN pnpm ui:install \
-    && pnpm ui:build \
-    && rm -rf ui/node_modules \
-    && pnpm store prune
-
-# Switch to the -slim variant of the runtime image (saves ~500MB+)
-FROM nikolaik/python-nodejs:python3.12-nodejs22-slim
+FROM ghcr.io/openclaw/openclaw:slim
 
 ENV NODE_ENV=production
 ENV PORT=6658
 
 ARG TIGRISFS_VERSION=1.2.1
 
+# Install TigrisFS (FUSE-based S3 mount) and runtime dependencies
 RUN set -eux; \
 	apt-get update; \
 	apt-get install -y --no-install-recommends \
 		fuse \
 		ca-certificates \
 		curl; \
-	corepack enable pnpm; \
 	curl -fsSL "https://github.com/tigrisdata/tigrisfs/releases/download/v${TIGRISFS_VERSION}/tigrisfs_${TIGRISFS_VERSION}_linux_amd64.deb" -o /tmp/tigrisfs.deb; \
 	dpkg -i /tmp/tigrisfs.deb; \
 	rm -f /tmp/tigrisfs.deb; \
 	rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# Copy only the pruned production files from the builder
-COPY --from=openclaw-build /app /openclaw
-
-RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/index.js "$@"' > /usr/local/bin/openclaw \
-	&& chmod +x /usr/local/bin/openclaw
-
+# Cloud Claw entrypoint: mounts TigrisFS workspace, seeds config, starts the gateway
 RUN install -m 755 /dev/stdin /entrypoint.sh <<'EOF'
 #!/bin/bash
 set -e
 
 MOUNT_POINT="/data"
 
-# State directory corresponds to ~/.openclaw (contains config, credentials, sessions)
-# Workspace defaults to $OPENCLAW_STATE_DIR/workspace per docs
 export OPENCLAW_STATE_DIR="$MOUNT_POINT"
 export OPENCLAW_WORKSPACE_DIR="$MOUNT_POINT/workspace"
 
@@ -82,8 +56,9 @@ if [ -z "$S3_ENDPOINT" ] || [ -z "$S3_BUCKET" ] || [ -z "$S3_ACCESS_KEY_ID" ] ||
 else
 	echo "[INFO] Mounting S3: ${S3_BUCKET} -> ${MOUNT_POINT}"
 
-	export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY_ID"
-	export AWS_SECRET_ACCESS_KEY="$S3_SECRET_ACCESS_KEY"
+	export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID}"
+	export AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY}"
+	export AWS_ENDPOINT_URL_S3="${S3_ENDPOINT}"
 	export AWS_REGION="${S3_REGION:-auto}"
 	export AWS_S3_PATH_STYLE="${S3_PATH_STYLE:-false}"
 
