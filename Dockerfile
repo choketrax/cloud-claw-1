@@ -18,6 +18,7 @@ ENV PORT=6658
 ARG TIGRISFS_VERSION=1.2.1
 
 # Install TigrisFS (FUSE-based S3 mount) and runtime dependencies
+# Root is available in this image; node user is used at runtime via ENTRYPOINT
 RUN set -eux; \
 	apt-get update; \
 	apt-get install -y --no-install-recommends \
@@ -36,6 +37,8 @@ set -e
 
 MOUNT_POINT="/data"
 
+# State directory corresponds to ~/.openclaw (contains config, credentials, sessions)
+# Workspace defaults to $OPENCLAW_STATE_DIR/workspace per docs
 export OPENCLAW_STATE_DIR="$MOUNT_POINT"
 export OPENCLAW_WORKSPACE_DIR="$MOUNT_POINT/workspace"
 
