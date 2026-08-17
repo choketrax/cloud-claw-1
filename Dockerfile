@@ -123,11 +123,36 @@ fi
 
 echo "[INFO] Starting OpenClaw Gateway..."
 echo "[INFO] Visit Web UI for initial setup on first use"
+cd "$OPENCLAW_WORKSPACE_DIR"
 
-# Execute from the base image's default WORKDIR where openclaw.mjs is located
-node openclaw.mjs gateway --port 6658 --bind lan --allow-unconfigured &
+if command -v openclaw >/dev/null 2>&1; then
+    echo "[INFO] Using global openclaw binary"
+    openclaw gateway --port 6658 --bind lan --allow-unconfigured &
+elif npx --no-install openclaw --version >/dev/null 2>&1; then
+    echo "[INFO] Using npx openclaw"
+    npx --no-install openclaw gateway --port 6658 --bind lan --allow-unconfigured &
+elif [ -f "/app/openclaw.mjs" ]; then
+    echo "[INFO] Using /app/openclaw.mjs"
+    node /app/openclaw.mjs gateway --port 6658 --bind lan --allow-unconfigured &
+elif [ -f "/usr/src/app/openclaw.mjs" ]; then
+    echo "[INFO] Using /usr/src/app/openclaw.mjs"
+    node /usr/src/app/openclaw.mjs gateway --port 6658 --bind lan --allow-unconfigured &
+else
+    echo "[WARN] Could not find openclaw via standard paths, searching..."
+    FOUND=$(find / -maxdepth 4 -name "openclaw.mjs" 2>/dev/null | head -n 1)
+    if [ -n "$FOUND" ]; then
+        echo "[INFO] Found openclaw.mjs at $FOUND"
+        node "$FOUND" gateway --port 6658 --bind lan --allow-unconfigured &
+    else
+        echo "[FATAL] openclaw not found!"
+        sleep 3600
+        exit 1
+    fi
+fi
+
 OPENCLAW_PID=$!
-wait $OPENCLAW_PID
+wait $OPENCLAW_PID || echo "[WARN] OpenClaw exited with code $?"
+sleep 60
 EOF
 
 EXPOSE 6658

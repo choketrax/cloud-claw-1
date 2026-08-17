@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "cloud-claw",
+  "name": "cloud-claw-v2",
   "main": "./src/index.ts",
   "compatibility_date": "2026-01-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -24,7 +24,7 @@
   },
   "containers": [
     {
-      "name": "cloud-claw-container",
+      "name": "cloud-claw-container-v2",
       "class_name": "AgentContainer",
       "image": "./Dockerfile",
       "instance_type": {
