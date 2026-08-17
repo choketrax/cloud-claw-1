@@ -92,7 +92,7 @@ if [ ! -f "$OPENCLAW_STATE_DIR/openclaw.json" ]; then
 {
   "gateway": {
     "mode": "local",
-    "bind": "lan",
+    "bind": "all",
     "port": 6658,
     "auth": {
       "mode": "token"
@@ -127,22 +127,22 @@ cd "$OPENCLAW_WORKSPACE_DIR"
 
 if command -v openclaw >/dev/null 2>&1; then
     echo "[INFO] Using global openclaw binary"
-    openclaw gateway --port 6658 --bind lan --allow-unconfigured &
+    openclaw gateway --port 6658 --bind all --allow-unconfigured &
 elif npx --no-install openclaw --version >/dev/null 2>&1; then
     echo "[INFO] Using npx openclaw"
-    npx --no-install openclaw gateway --port 6658 --bind lan --allow-unconfigured &
+    npx --no-install openclaw gateway --port 6658 --bind all --allow-unconfigured &
 elif [ -f "/app/openclaw.mjs" ]; then
     echo "[INFO] Using /app/openclaw.mjs"
-    node /app/openclaw.mjs gateway --port 6658 --bind lan --allow-unconfigured &
+    node /app/openclaw.mjs gateway --port 6658 --bind all --allow-unconfigured &
 elif [ -f "/usr/src/app/openclaw.mjs" ]; then
     echo "[INFO] Using /usr/src/app/openclaw.mjs"
-    node /usr/src/app/openclaw.mjs gateway --port 6658 --bind lan --allow-unconfigured &
+    node /usr/src/app/openclaw.mjs gateway --port 6658 --bind all --allow-unconfigured &
 else
     echo "[WARN] Could not find openclaw via standard paths, searching..."
     FOUND=$(find / -maxdepth 4 -name "openclaw.mjs" 2>/dev/null | head -n 1)
     if [ -n "$FOUND" ]; then
         echo "[INFO] Found openclaw.mjs at $FOUND"
-        node "$FOUND" gateway --port 6658 --bind lan --allow-unconfigured &
+        node "$FOUND" gateway --port 6658 --bind all --allow-unconfigured &
     else
         echo "[FATAL] openclaw not found!"
         sleep 3600
