@@ -123,14 +123,13 @@ fi
 
 echo "[INFO] Starting OpenClaw Gateway..."
 echo "[INFO] Visit Web UI for initial setup on first use"
-cd "$OPENCLAW_WORKSPACE_DIR"
 
-openclaw gateway --port 6658 --bind lan --allow-unconfigured &
+# Execute from the base image's default WORKDIR where openclaw.mjs is located
+node openclaw.mjs gateway --port 6658 --bind lan --allow-unconfigured &
 OPENCLAW_PID=$!
 wait $OPENCLAW_PID
 EOF
 
-WORKDIR /data/workspace
 EXPOSE 6658
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
