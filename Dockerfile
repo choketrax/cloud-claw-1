@@ -8,6 +8,8 @@ ENV PORT=6658
 
 ARG TIGRISFS_VERSION=1.2.1
 
+USER root
+
 RUN set -eux; \
 	apt-get update; \
 	apt-get install -y --no-install-recommends \
