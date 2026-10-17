@@ -77,16 +77,26 @@ export class AgentContainer extends Container {
   }
 
   override async onStart(): Promise<void> {
+    console.info('AgentContainer onStart lifecycle triggered')
     if (this.sleepAfter !== 'never') {
-      await this.watchContainer()
+      this.watchContainer().catch((err) => {
+        console.warn('watchContainer background error:', err)
+      })
     }
   }
 }
 
-const SINGLETON_CONTAINER_ID = 'cf-singleton-container-v-origin-fix'
+const SINGLETON_CONTAINER_ID = 'cf-singleton-container-v-diag-1'
 
 export async function forwardRequestToContainer(request: Request) {
   const objectId = env.AGENT_CONTAINER.idFromName(SINGLETON_CONTAINER_ID)
   const container = env.AGENT_CONTAINER.get(objectId, { locationHint: 'wnam' })
-  return container.fetch(request)
+  try {
+    return await container.fetch(request)
+  } catch (err: any) {
+    return new Response(`Container Fetch Error: ${err?.message || err}\n${err?.stack || ''}`, {
+      status: 502,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    })
+  }
 }
