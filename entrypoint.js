@@ -24,6 +24,29 @@ log(`Node: ${process.version}, Platform: ${process.platform}, Arch: ${process.ar
 let isOpenClawReady = false
 let gatewayStatus = 'initializing'
 let openclawProcess = null
+let globalExecutable = null
+let globalWorkspaceDir = '/data/workspace'
+
+function approveDevice(requestId) {
+  if (!globalExecutable) return
+  const args = requestId
+    ? [...globalExecutable.args, 'devices', 'approve', requestId]
+    : [...globalExecutable.args, 'devices', 'approve', '--latest']
+  try {
+    const res = cp.spawnSync(globalExecutable.cmd, args, {
+      cwd: globalWorkspaceDir,
+      env: process.env,
+      encoding: 'utf8',
+      timeout: 10000,
+    })
+    const out = ((res.stdout || '') + ' ' + (res.stderr || '')).trim()
+    if (out && !out.includes('No pending device')) {
+      log(`[auto-approve ${requestId || 'latest'}] ${out}`)
+    }
+  } catch (err) {
+    log(`[auto-approve error] ${err.message}`)
+  }
+}
 
 function getCleanHeaders(incomingHeaders) {
   const clean = {}
@@ -74,6 +97,9 @@ function getCleanHeaders(incomingHeaders) {
   clean['host'] = `127.0.0.1:${OPENCLAW_PORT}`
   clean['x-forwarded-for'] = clientIp
   clean['x-forwarded-proto'] = 'https'
+  clean['x-forwarded-user'] = 'agili'
+  clean['x-openclaw-scopes'] =
+    'operator.read,operator.write,operator.approvals,operator.questions,operator.admin'
   return clean
 }
 
@@ -89,6 +115,34 @@ const server = http.createServer((req, res) => {
   if (req.url === '/_logs' || req.url === '/_status') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
     return res.end(`Status: ${gatewayStatus}\n\n=== RECENT LOGS ===\n` + logs.join('\n'))
+  }
+
+  // Device approval endpoint
+  if (req.url?.startsWith('/_approve') || req.url?.startsWith('/_devices')) {
+    if (!globalExecutable) {
+      res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' })
+      return res.end('OpenClaw executable not initialized yet')
+    }
+    const url = new URL(req.url, 'http://localhost')
+    const id = url.searchParams.get('id')
+    const args = id
+      ? [...globalExecutable.args, 'devices', 'approve', id]
+      : [...globalExecutable.args, 'devices', 'approve', '--latest']
+    try {
+      const resExec = cp.spawnSync(globalExecutable.cmd, args, {
+        cwd: globalWorkspaceDir,
+        env: process.env,
+        encoding: 'utf8',
+        timeout: 10000,
+      })
+      const out = (resExec.stdout || '') + '\n' + (resExec.stderr || '')
+      log(`[manual approve] status=${resExec.status} out=${out}`)
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+      return res.end(`Device Approval Output:\n${out}\nExit code: ${resExec.status}`)
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' })
+      return res.end(`Error: ${e.message}`)
+    }
   }
 
   if (isOpenClawReady) {
@@ -205,9 +259,28 @@ async function initializeAndLaunch() {
         bind: 'lan',
         port: OPENCLAW_PORT,
         trustedProxies: ['127.0.0.1', '::ffff:127.0.0.1', '::1'],
+        nodes: {
+          pairing: {
+            autoApproveLocal: true,
+          },
+        },
         auth: {
           mode: 'token',
           token: GATEWAY_TOKEN,
+          trustedProxy: {
+            userHeader: 'x-forwarded-user',
+            allowLoopback: true,
+            deviceAutoApprove: {
+              enabled: true,
+              scopes: [
+                'operator.read',
+                'operator.write',
+                'operator.approvals',
+                'operator.questions',
+                'operator.admin',
+              ],
+            },
+          },
         },
         controlUi: {
           dangerouslyAllowHostHeaderOriginFallback: true,
@@ -245,7 +318,9 @@ async function initializeAndLaunch() {
     log(`Config written to ${path.join(stateDir, 'openclaw.json')}`)
 
     // Find OpenClaw executable
+    globalWorkspaceDir = workspaceDir
     const executable = findExecutable()
+    globalExecutable = executable
     if (!executable) {
       gatewayStatus = 'binary_not_found'
       log(`FATAL: Could not locate OpenClaw executable!`)
@@ -375,6 +450,16 @@ function launchGateway(executable, cwd) {
     const lines = data.toString('utf8').trim().split('\n')
     for (const l of lines) {
       log(`[openclaw stderr] ${l}`)
+      const m = l.match(/requestId[:=\s]+([a-zA-Z0-9_-]+)/i)
+      if (
+        m &&
+        (l.includes('pairing required') ||
+          l.includes('not approved yet') ||
+          l.includes('reason=not-paired'))
+      ) {
+        log(`[auto-approve trigger] Found unapproved device requestId=${m[1]}`)
+        approveDevice(m[1])
+      }
     }
   })
 
@@ -401,6 +486,11 @@ function pollPort() {
     log(`OpenClaw port ${OPENCLAW_PORT} responded with HTTP ${res.statusCode}! Marking READY.`)
     isOpenClawReady = true
     gatewayStatus = 'ready'
+
+    // Automatically check and approve any pending device requests periodically
+    setInterval(() => {
+      approveDevice()
+    }, 2500)
   })
 
   req.on('error', () => {
