@@ -459,7 +459,6 @@ async function initializeAndLaunch() {
         },
         controlUi: {
           dangerouslyAllowHostHeaderOriginFallback: true,
-          allowInsecureAuth: true,
           allowedOrigins: [
             '*',
             WORKER_URL,
@@ -642,19 +641,26 @@ function launchGateway(executable, cwd) {
   openclawProcess.on('exit', (code, signal) => {
     isOpenClawReady = false
     gatewayStatus = `exited (code ${code}, signal ${signal})`
-    log(`OpenClaw process exited with code ${code}, signal ${signal}`)
+    log(`OpenClaw process exited with code ${code}, signal ${signal}. Restarting in 2s...`)
+    setTimeout(() => {
+      if (globalExecutable) launchGateway(globalExecutable, globalWorkspaceDir)
+    }, 2000)
   })
 
   openclawProcess.on('error', (err) => {
     isOpenClawReady = false
     gatewayStatus = `spawn_error: ${err.message}`
-    log(`OpenClaw spawn error: ${err.message}`)
+    log(`OpenClaw spawn error: ${err.message}. Restarting in 3s...`)
+    setTimeout(() => {
+      if (globalExecutable) launchGateway(globalExecutable, globalWorkspaceDir)
+    }, 3000)
   })
 
   // Poll OpenClaw port until ready
   pollPort()
 }
 
+let approveInterval = null
 function pollPort() {
   if (isOpenClawReady) return
 
@@ -664,9 +670,11 @@ function pollPort() {
     gatewayStatus = 'ready'
 
     // Automatically check and approve any pending device requests periodically
-    setInterval(() => {
-      approveAllPending()
-    }, 2000)
+    if (!approveInterval) {
+      approveInterval = setInterval(() => {
+        approveAllPending()
+      }, 2000)
+    }
   })
 
   req.on('error', () => {
