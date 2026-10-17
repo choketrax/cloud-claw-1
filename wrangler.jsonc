@@ -18,6 +18,10 @@
   "placement": {
     "region": "aws:us-west-2",
   },
+  "vars": {
+    "WORKER_URL": "https://cloud-claw-final.dl-56e.workers.dev",
+    "OPENCLAW_GATEWAY_TOKEN": "cloud-claw",
+  },
   "browser": {
     "binding": "BROWSER",
     "remote": true,

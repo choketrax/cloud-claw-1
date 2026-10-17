@@ -21,18 +21,16 @@ RUN set -eux; \
 	rm -f /tmp/tigrisfs.deb; \
 	rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# openclaw CLI is already on PATH in the official slim image — no COPY or shim needed.
-
 RUN install -m 755 /dev/stdin /entrypoint.sh <<'EOF'
 #!/bin/bash
 set -e
 
 MOUNT_POINT="/data"
 
-# State directory corresponds to ~/.openclaw (contains config, credentials, sessions)
-# Workspace defaults to $OPENCLAW_STATE_DIR/workspace per docs
 export OPENCLAW_STATE_DIR="$MOUNT_POINT"
 export OPENCLAW_WORKSPACE_DIR="$MOUNT_POINT/workspace"
+export WORKER_URL="${WORKER_URL:-https://cloud-claw-final.dl-56e.workers.dev}"
+export OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-cloud-claw}"
 
 setup_workspace() {
 	mkdir -p "$OPENCLAW_WORKSPACE_DIR"
@@ -81,24 +79,26 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-if [ -n "$OPENCLAW_GATEWAY_TOKEN" ]; then
-	echo "[INFO] Using Gateway Token from environment variable"
-else
-	echo "[WARN] OPENCLAW_GATEWAY_TOKEN not set, will be auto-generated"
-fi
-
 if [ ! -f "$OPENCLAW_STATE_DIR/openclaw.json" ]; then
 	cat > "$OPENCLAW_STATE_DIR/openclaw.json" << 'EOFCONFIG'
 {
   "gateway": {
     "mode": "local",
-    "bind": "all",
+    "bind": "lan",
     "port": 6658,
     "auth": {
-      "mode": "token"
+      "mode": "token",
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
     },
     "controlUi": {
-      "allowInsecureAuth": true
+      "allowInsecureAuth": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true,
+      "allowedOrigins": [
+        "https://cloud-claw-final.dl-56e.workers.dev",
+        "http://localhost:6658",
+        "http://127.0.0.1:6658",
+        "http://container"
+      ]
     }
   },
   "browser": {
@@ -111,50 +111,25 @@ if [ ! -f "$OPENCLAW_STATE_DIR/openclaw.json" ]; then
     "profiles": {
       "cloudflare": {
         "cdpUrl": "${WORKER_URL}/cloudflare.browser/${OPENCLAW_GATEWAY_TOKEN}",
-        "driver": "clawd",
+        "driver": "openclaw",
         "color": "#FF4500"
       }
     }
   }
 }
 EOFCONFIG
-	echo "[INFO] Default config file created (local mode + allowInsecureAuth)"
+	echo "[INFO] Default config file created (local mode + LAN allowedOrigins + HostHeaderOriginFallback)"
 fi
 
-echo "[INFO] Starting OpenClaw Gateway..."
-echo "[INFO] Visit Web UI for initial setup on first use"
+echo "[INFO] Starting OpenClaw Gateway on port 6658..."
 cd "$OPENCLAW_WORKSPACE_DIR"
 
-if command -v openclaw >/dev/null 2>&1; then
-    echo "[INFO] Using global openclaw binary"
-    openclaw gateway --port 6658 --bind all --allow-unconfigured &
-elif npx --no-install openclaw --version >/dev/null 2>&1; then
-    echo "[INFO] Using npx openclaw"
-    npx --no-install openclaw gateway --port 6658 --bind all --allow-unconfigured &
-elif [ -f "/app/openclaw.mjs" ]; then
-    echo "[INFO] Using /app/openclaw.mjs"
-    node /app/openclaw.mjs gateway --port 6658 --bind all --allow-unconfigured &
-elif [ -f "/usr/src/app/openclaw.mjs" ]; then
-    echo "[INFO] Using /usr/src/app/openclaw.mjs"
-    node /usr/src/app/openclaw.mjs gateway --port 6658 --bind all --allow-unconfigured &
-else
-    echo "[WARN] Could not find openclaw via standard paths, searching..."
-    FOUND=$(find / -maxdepth 4 -name "openclaw.mjs" 2>/dev/null | head -n 1)
-    if [ -n "$FOUND" ]; then
-        echo "[INFO] Found openclaw.mjs at $FOUND"
-        node "$FOUND" gateway --port 6658 --bind all --allow-unconfigured &
-    else
-        echo "[FATAL] openclaw not found!"
-        sleep 3600
-        exit 1
-    fi
-fi
-
+openclaw gateway --port 6658 --bind lan --token "$OPENCLAW_GATEWAY_TOKEN" --allow-unconfigured &
 OPENCLAW_PID=$!
-wait $OPENCLAW_PID || echo "[WARN] OpenClaw exited with code $?"
-sleep 60
+wait $OPENCLAW_PID
 EOF
 
+WORKDIR /data/workspace
 EXPOSE 6658
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
