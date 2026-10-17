@@ -40,22 +40,22 @@ const server = http.createServer((req, res) => {
   }
 
   if (isOpenClawReady) {
-    const clientIp = req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || '127.0.0.1';
-    const clientHost = req.headers.host || 'cloud-claw-final.dl-56e.workers.dev';
-    const proxyHeaders = {
-      ...req.headers,
-      host: clientHost,
-      'x-forwarded-for': clientIp,
-      'x-forwarded-proto': 'https',
-      'x-forwarded-host': clientHost,
-    };
+    const cleanHeaders = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      const lower = key.toLowerCase();
+      if (lower.startsWith('x-forwarded-') || lower.startsWith('cf-') || lower === 'host') {
+        continue;
+      }
+      cleanHeaders[key] = value;
+    }
+    cleanHeaders['host'] = `127.0.0.1:${OPENCLAW_PORT}`;
 
     const proxyReq = http.request({
       hostname: '127.0.0.1',
       port: OPENCLAW_PORT,
       path: req.url,
       method: req.method,
-      headers: proxyHeaders,
+      headers: cleanHeaders,
     }, (proxyRes) => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
@@ -93,19 +93,19 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
 
-  const clientIp = req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || '127.0.0.1';
-  const clientHost = req.headers.host || 'cloud-claw-final.dl-56e.workers.dev';
-  const headers = {
-    ...req.headers,
-    host: clientHost,
-    'x-forwarded-for': clientIp,
-    'x-forwarded-proto': 'https',
-    'x-forwarded-host': clientHost,
-  };
+  const cleanHeaders = {};
+  for (const [key, value] of Object.entries(req.headers)) {
+    const lower = key.toLowerCase();
+    if (lower.startsWith('x-forwarded-') || lower.startsWith('cf-') || lower === 'host') {
+      continue;
+    }
+    cleanHeaders[key] = value;
+  }
+  cleanHeaders['host'] = `127.0.0.1:${OPENCLAW_PORT}`;
 
   const targetSocket = net.connect(OPENCLAW_PORT, '127.0.0.1', () => {
     let rawHeaders = `${req.method} ${req.url} HTTP/1.1\r\n`;
-    for (const [key, value] of Object.entries(headers)) {
+    for (const [key, value] of Object.entries(cleanHeaders)) {
       if (Array.isArray(value)) {
         for (const v of value) rawHeaders += `${key}: ${v}\r\n`;
       } else if (value !== undefined) {
@@ -229,9 +229,30 @@ async function initializeAndLaunch() {
         timeout: 15000,
       });
       if (docRes.stdout) log(`[doctor stdout] ${docRes.stdout.trim()}`);
-      if (docRes.stderr) log(`[doctor stderr] ${docRes.stderr.trim()}`);
     } catch (e) {
       log(`openclaw doctor error: ${e.message}`);
+    }
+
+    // Ensure trustedProxies is definitely in openclaw.json
+    try {
+      const cfgPath = path.join(stateDir, 'openclaw.json');
+      const loaded = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      if (!loaded.gateway) loaded.gateway = {};
+      loaded.gateway.trustedProxies = [
+        '127.0.0.1',
+        '::1',
+        '::ffff:127.0.0.1',
+        '10.0.0.0/8',
+        '172.16.0.0/12',
+        '192.168.0.0/16',
+      ];
+      fs.writeFileSync(cfgPath, JSON.stringify(loaded, null, 2), 'utf8');
+      try {
+        fs.writeFileSync('/home/node/.openclaw/openclaw.json', JSON.stringify(loaded, null, 2), 'utf8');
+      } catch {}
+      log(`Verified trustedProxies in ${cfgPath}`);
+    } catch (e) {
+      log(`Error ensuring trustedProxies in openclaw.json: ${e.message}`);
     }
 
     launchGateway(executable, workspaceDir);
