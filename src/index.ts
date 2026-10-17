@@ -4,30 +4,68 @@ import { forwardRequestToContainer } from './container'
 
 export { AgentContainer } from './container'
 
-function verifyBasicAuth(request: Request): Response | null {
+function checkAuth(request: Request, url: URL): { ok: boolean; setCookie?: string } {
   const username = env.SERVER_USERNAME
   const password = env.SERVER_PASSWORD
 
+  // If no password configured, auth is disabled
   if (!password) {
-    return null
+    return { ok: true }
   }
 
+  const expected = btoa(`${username || 'admin'}:${password}`)
+
+  // 1. Check session cookie
+  const cookieHeader = request.headers.get('Cookie') || ''
+  const cookies = Object.fromEntries(
+    cookieHeader
+      .split(';')
+      .map((c) => c.trim().split('='))
+      .filter(([k]) => Boolean(k)),
+  )
+  if (cookies['cf_auth'] === expected) {
+    return { ok: true }
+  }
+
+  // 2. Check Bearer token auth (matches OpenClaw gateway token or server password)
   const authorization = request.headers.get('Authorization')
-  if (!authorization?.startsWith('Basic ')) {
-    return new Response('Unauthorized', {
-      status: 401,
-      headers: { 'WWW-Authenticate': 'Basic realm="Agent"' },
-    })
+  if (authorization?.startsWith('Bearer ')) {
+    const bearer = authorization.slice(7).trim()
+    if (bearer === env.OPENCLAW_GATEWAY_TOKEN || bearer === password) {
+      return { ok: true }
+    }
   }
 
-  const expected = btoa(`${username}:${password}`)
-  const provided = authorization.slice(6)
-
-  if (provided !== expected) {
-    return new Response('Unauthorized', { status: 401 })
+  // 3. Check query parameter token
+  const queryToken = url.searchParams.get('token')
+  if (queryToken && (queryToken === env.OPENCLAW_GATEWAY_TOKEN || queryToken === password)) {
+    return {
+      ok: true,
+      setCookie: `cf_auth=${expected}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`,
+    }
   }
 
-  return null
+  // 4. Check Basic Auth
+  if (authorization?.startsWith('Basic ')) {
+    const provided = authorization.slice(6).trim()
+    if (provided === expected) {
+      return {
+        ok: true,
+        setCookie: `cf_auth=${expected}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`,
+      }
+    }
+  }
+
+  // 5. Allow public static assets and icons without auth challenges
+  if (
+    url.pathname === '/favicon.ico' ||
+    url.pathname === '/robots.txt' ||
+    url.pathname.startsWith('/assets/')
+  ) {
+    return { ok: true }
+  }
+
+  return { ok: false }
 }
 
 async function handleFetch(request: Request) {
@@ -49,12 +87,37 @@ async function handleFetch(request: Request) {
     return forwardRequestToContainer(request)
   }
 
-  // All other paths use Basic Auth
-  const authError = verifyBasicAuth(request)
-  if (authError) {
-    return authError
+  // Verify authentication
+  const auth = checkAuth(request, url)
+  if (!auth.ok) {
+    const isDocumentNavigation =
+      request.headers.get('Sec-Fetch-Dest') === 'document' ||
+      (request.headers.get('Accept')?.includes('text/html') &&
+        !request.headers.get('Accept')?.includes('application/json'))
+
+    // Only send WWW-Authenticate on direct top-level browser page loads.
+    // Never send WWW-Authenticate on subrequests or API calls, which triggers browser popup loops.
+    const headers: Record<string, string> = { 'Content-Type': 'text/plain; charset=utf-8' }
+    if (isDocumentNavigation) {
+      headers['WWW-Authenticate'] = 'Basic realm="Agent"'
+    }
+    return new Response('Unauthorized', { status: 401, headers })
   }
-  return forwardRequestToContainer(request)
+
+  const response = await forwardRequestToContainer(request)
+
+  // If newly authenticated via Basic Auth or token, attach Set-Cookie
+  if (auth.setCookie) {
+    const newHeaders = new Headers(response.headers)
+    newHeaders.append('Set-Cookie', auth.setCookie)
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders,
+    })
+  }
+
+  return response
 }
 
 export default {
