@@ -28,10 +28,9 @@ let globalExecutable = null
 let globalWorkspaceDir = '/data/workspace'
 
 function approveDevice(requestId) {
-  if (!globalExecutable || !requestId) return ''
-  log(`[approveDevice] Attempting approval for requestId=${requestId}`)
+  if (!globalExecutable || !requestId) return
+  log(`[approveDevice] Triggering async approval for requestId=${requestId}`)
 
-  // 1. Try with --url and --token via WebSocket RPC
   const args1 = [
     ...globalExecutable.args,
     'devices',
@@ -42,44 +41,39 @@ function approveDevice(requestId) {
     '--token',
     GATEWAY_TOKEN,
   ]
-  try {
-    const res1 = cp.spawnSync(globalExecutable.cmd, args1, {
+
+  cp.execFile(
+    globalExecutable.cmd,
+    args1,
+    {
       cwd: globalWorkspaceDir,
       env: process.env,
-      encoding: 'utf8',
-      timeout: 10000,
-    })
-    const out1 = ((res1.stdout || '') + ' ' + (res1.stderr || '')).trim()
-    log(`[approveDevice with --url ${requestId}] exit=${res1.status} out=${out1}`)
-    if (res1.status === 0) return out1
-  } catch (err) {
-    log(`[approveDevice with --url error] ${err.message}`)
-  }
-
-  // 2. Try local CLI mode
-  const args2 = [
-    ...globalExecutable.args,
-    'devices',
-    'approve',
-    requestId,
-  ]
-  try {
-    const res2 = cp.spawnSync(globalExecutable.cmd, args2, {
-      cwd: globalWorkspaceDir,
-      env: {
-        ...process.env,
-        OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
-      },
-      encoding: 'utf8',
-      timeout: 10000,
-    })
-    const out2 = ((res2.stdout || '') + ' ' + (res2.stderr || '')).trim()
-    log(`[approveDevice local ${requestId}] exit=${res2.status} out=${out2}`)
-    return out2
-  } catch (err) {
-    log(`[approveDevice local error] ${err.message}`)
-    return err.message
-  }
+      timeout: 8000,
+    },
+    (err1, stdout1, stderr1) => {
+      const out1 = ((stdout1 || '') + ' ' + (stderr1 || '')).trim()
+      log(`[approveDevice with --url ${requestId}] exit=${err1 ? err1.code || 1 : 0} out=${out1}`)
+      if (err1) {
+        const args2 = [...globalExecutable.args, 'devices', 'approve', requestId]
+        cp.execFile(
+          globalExecutable.cmd,
+          args2,
+          {
+            cwd: globalWorkspaceDir,
+            env: {
+              ...process.env,
+              OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
+            },
+            timeout: 8000,
+          },
+          (err2, stdout2, stderr2) => {
+            const out2 = ((stdout2 || '') + ' ' + (stderr2 || '')).trim()
+            log(`[approveDevice local ${requestId}] exit=${err2 ? err2.code || 1 : 0} out=${out2}`)
+          },
+        )
+      }
+    },
+  )
 }
 
 function getPendingRequestIds() {
@@ -711,7 +705,6 @@ function launchGateway(executable, cwd) {
   pollPort()
 }
 
-let approveInterval = null
 function pollPort() {
   if (isOpenClawReady) return
 
@@ -719,13 +712,6 @@ function pollPort() {
     log(`OpenClaw port ${OPENCLAW_PORT} responded with HTTP ${res.statusCode}! Marking READY.`)
     isOpenClawReady = true
     gatewayStatus = 'ready'
-
-    // Automatically check and approve any pending device requests periodically
-    if (!approveInterval) {
-      approveInterval = setInterval(() => {
-        approveAllPending()
-      }, 2000)
-    }
   })
 
   req.on('error', () => {
