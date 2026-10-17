@@ -372,7 +372,11 @@ server.on('upgrade', (req, socket, head) => {
   const cleanHeaders = getCleanHeaders(req.headers)
 
   const targetSocket = net.connect(OPENCLAW_PORT, '127.0.0.1', () => {
-    let rawHeaders = `${req.method} ${req.url} HTTP/1.1\r\n`
+    let targetUrl = req.url
+    if (!targetUrl.includes('token=')) {
+      targetUrl += (targetUrl.includes('?') ? '&' : '?') + `token=${GATEWAY_TOKEN}`
+    }
+    let rawHeaders = `${req.method} ${targetUrl} HTTP/1.1\r\n`
     for (const [key, value] of Object.entries(cleanHeaders)) {
       if (Array.isArray(value)) {
         for (const v of value) rawHeaders += `${key}: ${v}\r\n`
