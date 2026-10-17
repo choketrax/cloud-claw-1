@@ -8,7 +8,7 @@ const containerEnv = Object.fromEntries(
 )
 
 export class AgentContainer extends Container {
-  sleepAfter = '10m'
+  sleepAfter = '24h'
   defaultPort = PORT
 
   envVars = {
