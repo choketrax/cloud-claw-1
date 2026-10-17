@@ -142,7 +142,7 @@ async function initializeAndLaunch() {
     process.env.OPENCLAW_WORKSPACE_DIR = workspaceDir;
     process.env.OPENCLAW_CONFIG_PATH = path.join(stateDir, 'openclaw.json');
 
-    // Create openclaw.json
+    // Create openclaw.json with valid current schema
     const config = {
       gateway: {
         mode: 'local',
@@ -153,7 +153,6 @@ async function initializeAndLaunch() {
           token: GATEWAY_TOKEN,
         },
         controlUi: {
-          allowInsecureAuth: true,
           dangerouslyAllowHostHeaderOriginFallback: true,
           allowedOrigins: [
             WORKER_URL,
@@ -167,16 +166,11 @@ async function initializeAndLaunch() {
       },
       browser: {
         enabled: true,
-        evaluateEnabled: true,
-        remoteCdpTimeoutMs: 120000,
-        remoteCdpHandshakeTimeoutMs: 60000,
-        attachOnly: true,
         defaultProfile: 'cloudflare',
         profiles: {
           cloudflare: {
             cdpUrl: `${WORKER_URL}/cloudflare.browser/${GATEWAY_TOKEN}`,
             driver: 'openclaw',
-            color: '#FF4500',
           },
         },
       },
@@ -198,6 +192,21 @@ async function initializeAndLaunch() {
       log(`FATAL: Could not locate OpenClaw executable!`);
       listDebugPaths();
       return;
+    }
+
+    // Run openclaw doctor --fix to sanitize config schema if needed
+    try {
+      log('Running openclaw doctor --fix...');
+      const docRes = cp.spawnSync(executable.cmd, [...executable.args, 'doctor', '--fix', '--yes'], {
+        cwd: workspaceDir,
+        env: { ...process.env, PORT: OPENCLAW_PORT.toString() },
+        encoding: 'utf8',
+        timeout: 15000,
+      });
+      if (docRes.stdout) log(`[doctor stdout] ${docRes.stdout.trim()}`);
+      if (docRes.stderr) log(`[doctor stderr] ${docRes.stderr.trim()}`);
+    } catch (e) {
+      log(`openclaw doctor error: ${e.message}`);
     }
 
     launchGateway(executable, workspaceDir);
