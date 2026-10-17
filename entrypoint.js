@@ -36,7 +36,27 @@ function getCleanHeaders(incomingHeaders) {
     'cf-ipcountry',
     'cf-ray',
     'cf-visitor',
+    'authorization', // Do not forward Worker Basic Auth to OpenClaw
   ])
+
+  // Extract or synthesize a valid non-loopback client IP for OpenClaw trusted-proxy attribution
+  let clientIp =
+    incomingHeaders['cf-connecting-ip'] ||
+    (typeof incomingHeaders['x-forwarded-for'] === 'string'
+      ? incomingHeaders['x-forwarded-for'].split(',')[0].trim()
+      : undefined) ||
+    incomingHeaders['x-real-ip'] ||
+    '1.1.1.1'
+
+  if (
+    !clientIp ||
+    clientIp.startsWith('127.') ||
+    clientIp === '::1' ||
+    clientIp === 'localhost' ||
+    clientIp === 'unknown'
+  ) {
+    clientIp = '1.1.1.1'
+  }
 
   for (const [key, value] of Object.entries(incomingHeaders)) {
     const lower = key.toLowerCase()
@@ -50,7 +70,10 @@ function getCleanHeaders(incomingHeaders) {
     }
     clean[key] = value
   }
+
   clean['host'] = `127.0.0.1:${OPENCLAW_PORT}`
+  clean['x-forwarded-for'] = clientIp
+  clean['x-forwarded-proto'] = 'https'
   return clean
 }
 
@@ -181,6 +204,7 @@ async function initializeAndLaunch() {
         mode: 'local',
         bind: 'lan',
         port: OPENCLAW_PORT,
+        trustedProxies: ['127.0.0.1', '::ffff:127.0.0.1', '::1'],
         auth: {
           mode: 'token',
           token: GATEWAY_TOKEN,
@@ -188,7 +212,9 @@ async function initializeAndLaunch() {
         controlUi: {
           dangerouslyAllowHostHeaderOriginFallback: true,
           allowedOrigins: [
+            '*',
             WORKER_URL,
+            'https://cloud-claw-final.dl-56e.workers.dev',
             `http://localhost:${PORT}`,
             `http://127.0.0.1:${PORT}`,
             `http://localhost:${OPENCLAW_PORT}`,
