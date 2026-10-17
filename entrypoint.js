@@ -25,6 +25,35 @@ let isOpenClawReady = false
 let gatewayStatus = 'initializing'
 let openclawProcess = null
 
+function getCleanHeaders(incomingHeaders) {
+  const clean = {}
+  const forbidden = new Set([
+    'x-real-ip',
+    'forwarded',
+    'via',
+    'true-client-ip',
+    'cf-connecting-ip',
+    'cf-ipcountry',
+    'cf-ray',
+    'cf-visitor',
+  ])
+
+  for (const [key, value] of Object.entries(incomingHeaders)) {
+    const lower = key.toLowerCase()
+    if (
+      lower.startsWith('x-forwarded-') ||
+      lower.startsWith('cf-') ||
+      forbidden.has(lower) ||
+      lower === 'host'
+    ) {
+      continue
+    }
+    clean[key] = value
+  }
+  clean['host'] = `127.0.0.1:${OPENCLAW_PORT}`
+  return clean
+}
+
 // 1. Start HTTP Server immediately so Cloudflare Containers probe succeeds instantly
 const server = http.createServer((req, res) => {
   // Always answer /health and /healthz with 200
@@ -40,15 +69,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (isOpenClawReady) {
-    const cleanHeaders = {}
-    for (const [key, value] of Object.entries(req.headers)) {
-      const lower = key.toLowerCase()
-      if (lower.startsWith('x-forwarded-') || lower.startsWith('cf-') || lower === 'host') {
-        continue
-      }
-      cleanHeaders[key] = value
-    }
-    cleanHeaders['host'] = `127.0.0.1:${OPENCLAW_PORT}`
+    const cleanHeaders = getCleanHeaders(req.headers)
 
     const proxyReq = http.request(
       {
@@ -77,7 +98,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8',
       'Retry-After': '5',
-      Refresh: '5',
+      'Refresh': '5',
     })
     res.end(
       `OpenClaw Gateway status: [${gatewayStatus}]\n` +
@@ -96,15 +117,7 @@ server.on('upgrade', (req, socket, head) => {
     return
   }
 
-  const cleanHeaders = {}
-  for (const [key, value] of Object.entries(req.headers)) {
-    const lower = key.toLowerCase()
-    if (lower.startsWith('x-forwarded-') || lower.startsWith('cf-') || lower === 'host') {
-      continue
-    }
-    cleanHeaders[key] = value
-  }
-  cleanHeaders['host'] = `127.0.0.1:${OPENCLAW_PORT}`
+  const cleanHeaders = getCleanHeaders(req.headers)
 
   const targetSocket = net.connect(OPENCLAW_PORT, '127.0.0.1', () => {
     let rawHeaders = `${req.method} ${req.url} HTTP/1.1\r\n`
@@ -168,14 +181,6 @@ async function initializeAndLaunch() {
         mode: 'local',
         bind: 'lan',
         port: OPENCLAW_PORT,
-        trustedProxies: [
-          '127.0.0.1',
-          '::1',
-          '::ffff:127.0.0.1',
-          '10.0.0.0/8',
-          '172.16.0.0/12',
-          '192.168.0.0/16',
-        ],
         auth: {
           mode: 'token',
           token: GATEWAY_TOKEN,
@@ -238,32 +243,6 @@ async function initializeAndLaunch() {
       if (docRes.stdout) log(`[doctor stdout] ${docRes.stdout.trim()}`)
     } catch (e) {
       log(`openclaw doctor error: ${e.message}`)
-    }
-
-    // Ensure trustedProxies is definitely in openclaw.json
-    try {
-      const cfgPath = path.join(stateDir, 'openclaw.json')
-      const loaded = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      if (!loaded.gateway) loaded.gateway = {}
-      loaded.gateway.trustedProxies = [
-        '127.0.0.1',
-        '::1',
-        '::ffff:127.0.0.1',
-        '10.0.0.0/8',
-        '172.16.0.0/12',
-        '192.168.0.0/16',
-      ]
-      fs.writeFileSync(cfgPath, JSON.stringify(loaded, null, 2), 'utf8')
-      try {
-        fs.writeFileSync(
-          '/home/node/.openclaw/openclaw.json',
-          JSON.stringify(loaded, null, 2),
-          'utf8',
-        )
-      } catch {}
-      log(`Verified trustedProxies in ${cfgPath}`)
-    } catch (e) {
-      log(`Error ensuring trustedProxies in openclaw.json: ${e.message}`)
     }
 
     launchGateway(executable, workspaceDir)

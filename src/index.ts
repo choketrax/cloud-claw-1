@@ -44,6 +44,11 @@ async function handleFetch(request: Request) {
     return proxyCdp(env.BROWSER, request, `${url.protocol}//${host}`, token)
   }
 
+  // WebSocket upgrades are authenticated via OpenClaw Gateway token
+  if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+    return forwardRequestToContainer(request)
+  }
+
   // All other paths use Basic Auth
   const authError = verifyBasicAuth(request)
   if (authError) {
