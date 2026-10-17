@@ -28,24 +28,138 @@ let globalExecutable = null
 let globalWorkspaceDir = '/data/workspace'
 
 function approveDevice(requestId) {
-  if (!globalExecutable) return
-  const args = requestId
-    ? [...globalExecutable.args, 'devices', 'approve', requestId]
-    : [...globalExecutable.args, 'devices', 'approve', '--latest']
+  if (!globalExecutable || !requestId) return ''
+  log(`[approveDevice] Attempting approval for requestId=${requestId}`)
+
+  // 1. Try with --url and --token via WebSocket RPC
+  const args1 = [
+    ...globalExecutable.args,
+    'devices',
+    'approve',
+    requestId,
+    '--url',
+    `ws://127.0.0.1:${OPENCLAW_PORT}`,
+    '--token',
+    GATEWAY_TOKEN,
+  ]
   try {
-    const res = cp.spawnSync(globalExecutable.cmd, args, {
+    const res1 = cp.spawnSync(globalExecutable.cmd, args1, {
       cwd: globalWorkspaceDir,
       env: process.env,
       encoding: 'utf8',
       timeout: 10000,
     })
-    const out = ((res.stdout || '') + ' ' + (res.stderr || '')).trim()
-    if (out && !out.includes('No pending device')) {
-      log(`[auto-approve ${requestId || 'latest'}] ${out}`)
-    }
+    const out1 = ((res1.stdout || '') + ' ' + (res1.stderr || '')).trim()
+    log(`[approveDevice with --url ${requestId}] exit=${res1.status} out=${out1}`)
+    if (res1.status === 0) return out1
   } catch (err) {
-    log(`[auto-approve error] ${err.message}`)
+    log(`[approveDevice with --url error] ${err.message}`)
   }
+
+  // 2. Try local CLI mode
+  const args2 = [
+    ...globalExecutable.args,
+    'devices',
+    'approve',
+    requestId,
+  ]
+  try {
+    const res2 = cp.spawnSync(globalExecutable.cmd, args2, {
+      cwd: globalWorkspaceDir,
+      env: {
+        ...process.env,
+        OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
+      },
+      encoding: 'utf8',
+      timeout: 10000,
+    })
+    const out2 = ((res2.stdout || '') + ' ' + (res2.stderr || '')).trim()
+    log(`[approveDevice local ${requestId}] exit=${res2.status} out=${out2}`)
+    return out2
+  } catch (err) {
+    log(`[approveDevice local error] ${err.message}`)
+    return err.message
+  }
+}
+
+function getPendingRequestIds() {
+  if (!globalExecutable) return []
+  const ids = new Set()
+
+  const attempts = [
+    [
+      ...globalExecutable.args,
+      'devices',
+      'list',
+      '--json',
+      '--url',
+      `ws://127.0.0.1:${OPENCLAW_PORT}`,
+      '--token',
+      GATEWAY_TOKEN,
+    ],
+    [
+      ...globalExecutable.args,
+      'devices',
+      'list',
+      '--json',
+    ],
+  ]
+
+  for (const args of attempts) {
+    try {
+      const res = cp.spawnSync(globalExecutable.cmd, args, {
+        cwd: globalWorkspaceDir,
+        env: {
+          ...process.env,
+          OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
+        },
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+      const out = res.stdout || ''
+      if (out) {
+        try {
+          const parsed = JSON.parse(out)
+          function scanObj(obj) {
+            if (!obj) return
+            if (Array.isArray(obj)) {
+              for (const el of obj) scanObj(el)
+            } else if (typeof obj === 'object') {
+              if (obj.requestId) ids.add(obj.requestId)
+              if (obj.id && obj.status === 'pending') ids.add(obj.id)
+              for (const k of Object.keys(obj)) {
+                if (k.toLowerCase().includes('pending') || k.toLowerCase().includes('request')) {
+                  scanObj(obj[k])
+                }
+              }
+            }
+          }
+          scanObj(parsed)
+        } catch {}
+
+        const matches = out.matchAll(/["']?requestId["']?\s*[:=]\s*["']?([a-zA-Z0-9_-]+)["']?/gi)
+        for (const m of matches) {
+          ids.add(m[1])
+        }
+      }
+      if (ids.size > 0) break
+    } catch (err) {
+      log(`[list devices error] ${err.message}`)
+    }
+  }
+
+  return Array.from(ids)
+}
+
+function approveAllPending() {
+  if (!globalExecutable || !isOpenClawReady) return []
+  const ids = getPendingRequestIds()
+  const results = []
+  for (const id of ids) {
+    const res = approveDevice(id)
+    results.push({ id, res })
+  }
+  return results
 }
 
 function getCleanHeaders(incomingHeaders) {
@@ -105,44 +219,68 @@ function getCleanHeaders(incomingHeaders) {
 
 // 1. Start HTTP Server immediately so Cloudflare Containers probe succeeds instantly
 const server = http.createServer((req, res) => {
+  const reqUrl = new URL(req.url, 'http://localhost')
+  const pathname = reqUrl.pathname
+
   // Always answer /health and /healthz with 200
-  if (req.url === '/health' || req.url === '/healthz') {
+  if (pathname === '/health' || pathname === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' })
     return res.end('OK')
   }
 
   // Diagnostic endpoints
-  if (req.url === '/_logs' || req.url === '/_status') {
+  if (pathname === '/_logs' || pathname === '/_status') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
     return res.end(`Status: ${gatewayStatus}\n\n=== RECENT LOGS ===\n` + logs.join('\n'))
   }
 
   // Device approval endpoint
-  if (req.url?.startsWith('/_approve') || req.url?.startsWith('/_devices')) {
+  if (pathname === '/_approve' || pathname === '/_devices') {
     if (!globalExecutable) {
       res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' })
       return res.end('OpenClaw executable not initialized yet')
     }
-    const url = new URL(req.url, 'http://localhost')
-    const id = url.searchParams.get('id')
-    const args = id
-      ? [...globalExecutable.args, 'devices', 'approve', id]
-      : [...globalExecutable.args, 'devices', 'approve', '--latest']
-    try {
-      const resExec = cp.spawnSync(globalExecutable.cmd, args, {
-        cwd: globalWorkspaceDir,
-        env: process.env,
-        encoding: 'utf8',
-        timeout: 10000,
-      })
-      const out = (resExec.stdout || '') + '\n' + (resExec.stderr || '')
-      log(`[manual approve] status=${resExec.status} out=${out}`)
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
-      return res.end(`Device Approval Output:\n${out}\nExit code: ${resExec.status}`)
-    } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' })
-      return res.end(`Error: ${e.message}`)
+    const id = reqUrl.searchParams.get('id')
+    let output = ''
+    if (id) {
+      output = `Approving requested ID [${id}]:\n` + approveDevice(id)
+    } else {
+      const approved = approveAllPending()
+      output = `Auto-approved pending devices: ${JSON.stringify(approved, null, 2)}\n\n`
+
+      try {
+        const listRes = cp.spawnSync(
+          globalExecutable.cmd,
+          [
+            ...globalExecutable.args,
+            'devices',
+            'list',
+            '--url',
+            `ws://127.0.0.1:${OPENCLAW_PORT}`,
+            '--token',
+            GATEWAY_TOKEN,
+          ],
+          {
+            cwd: globalWorkspaceDir,
+            env: {
+              ...process.env,
+              OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
+            },
+            encoding: 'utf8',
+            timeout: 5000,
+          },
+        )
+        output += `Current Device List:\n${listRes.stdout || ''}\n${listRes.stderr || ''}`
+      } catch (err) {
+        output += `Error listing devices: ${err.message}`
+      }
     }
+
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+    return res.end(
+      `=== OPENCLAW DEVICE PAIRING & APPROVAL ===\n\n${output}\n\n=== RECENT LOGS ===\n` +
+        logs.slice(-25).join('\n'),
+    )
   }
 
   if (isOpenClawReady) {
@@ -152,7 +290,7 @@ const server = http.createServer((req, res) => {
       {
         hostname: '127.0.0.1',
         port: OPENCLAW_PORT,
-        path: req.url,
+        path: reqUrl.pathname + reqUrl.search,
         method: req.method,
         headers: cleanHeaders,
       },
@@ -489,8 +627,8 @@ function pollPort() {
 
     // Automatically check and approve any pending device requests periodically
     setInterval(() => {
-      approveDevice()
-    }, 2500)
+      approveAllPending()
+    }, 2000)
   })
 
   req.on('error', () => {
