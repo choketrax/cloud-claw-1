@@ -17,12 +17,13 @@ function checkAuth(request: Request, url: URL): { ok: boolean; setCookie?: strin
 
   // 1. Check session cookie
   const cookieHeader = request.headers.get('Cookie') || ''
-  const cookies = Object.fromEntries(
-    cookieHeader
-      .split(';')
-      .map((c) => c.trim().split('='))
-      .filter(([k]) => Boolean(k)),
-  )
+  const cookies: Record<string, string> = {}
+  for (const part of cookieHeader.split(';')) {
+    const eqIdx = part.indexOf('=')
+    if (eqIdx !== -1) {
+      cookies[part.slice(0, eqIdx).trim()] = part.slice(eqIdx + 1).trim()
+    }
+  }
   if (cookies['cf_auth'] === expected) {
     return { ok: true }
   }
