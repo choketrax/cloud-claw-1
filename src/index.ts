@@ -83,14 +83,10 @@ async function handleFetch(request: Request) {
     return proxyCdp(env.BROWSER, request, `${url.protocol}//${host}`, token)
   }
 
-  // WebSocket upgrades are forwarded to container (ensure token query param is attached)
+  // WebSocket upgrades are forwarded directly to the container.
+  // We MUST pass `request` directly without `new Request()` to preserve workerd's native WebSocket transport handle.
+  // The supervisor entrypoint attaches the gateway token automatically if not present in the URL.
   if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
-    if (!url.searchParams.has('token')) {
-      const gatewayToken = env.OPENCLAW_GATEWAY_TOKEN || 'cloud-claw'
-      url.searchParams.set('token', gatewayToken)
-      const wsReq = new Request(url.toString(), request)
-      return forwardRequestToContainer(wsReq)
-    }
     return forwardRequestToContainer(request)
   }
 
@@ -111,14 +107,20 @@ async function handleFetch(request: Request) {
     return new Response('Unauthorized', { status: 401, headers })
   }
 
-  // If user visits the root page via browser without ?token=, redirect to include the gateway token
+  // If user visits any UI document page via browser without ?token=, redirect to include the gateway token
   // so the Control UI automatically ingests and persists it into sessionStorage!
   const isDocumentNavigation =
     request.headers.get('Sec-Fetch-Dest') === 'document' ||
     (request.headers.get('Accept')?.includes('text/html') &&
       !request.headers.get('Accept')?.includes('application/json'))
 
-  if (isDocumentNavigation && url.pathname === '/' && !url.searchParams.has('token')) {
+  if (
+    isDocumentNavigation &&
+    !url.pathname.startsWith('/assets/') &&
+    !url.pathname.startsWith('/cloudflare.browser') &&
+    !url.pathname.startsWith('/_') &&
+    !url.searchParams.has('token')
+  ) {
     const gatewayToken = env.OPENCLAW_GATEWAY_TOKEN || 'cloud-claw'
     url.searchParams.set('token', gatewayToken)
     const headers: Record<string, string> = {

@@ -153,6 +153,48 @@ function getPendingRequestIds() {
 
 function approveAllPending() {
   if (!globalExecutable || !isOpenClawReady) return []
+
+  // 1. Instantly approve the latest pairing request if any
+  try {
+    cp.spawnSync(
+      globalExecutable.cmd,
+      [
+        ...globalExecutable.args,
+        'devices',
+        'approve',
+        '--latest',
+        '--url',
+        `ws://127.0.0.1:${OPENCLAW_PORT}`,
+        '--token',
+        GATEWAY_TOKEN,
+      ],
+      {
+        cwd: globalWorkspaceDir,
+        env: process.env,
+        timeout: 3000,
+      },
+    )
+  } catch {}
+  try {
+    cp.spawnSync(
+      globalExecutable.cmd,
+      [
+        ...globalExecutable.args,
+        'devices',
+        'approve',
+        '--latest',
+      ],
+      {
+        cwd: globalWorkspaceDir,
+        env: {
+          ...process.env,
+          OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
+        },
+        timeout: 3000,
+      },
+    )
+  } catch {}
+
   const ids = getPendingRequestIds()
   const results = []
   for (const id of ids) {
@@ -369,7 +411,11 @@ server.on('upgrade', (req, socket, head) => {
     return
   }
 
+  // Pause socket until target connection is established to avoid data frame drop
+  socket.pause()
+
   const cleanHeaders = getCleanHeaders(req.headers)
+  log(`WS upgrade: ${req.method} ${req.url} clientIp=${cleanHeaders['x-forwarded-for']}`)
 
   const targetSocket = net.connect(OPENCLAW_PORT, '127.0.0.1', () => {
     let targetUrl = req.url
@@ -393,6 +439,7 @@ server.on('upgrade', (req, socket, head) => {
 
     socket.pipe(targetSocket)
     targetSocket.pipe(socket)
+    socket.resume()
   })
 
   targetSocket.on('error', (err) => {

@@ -86,7 +86,7 @@ export class AgentContainer extends Container {
   }
 }
 
-const SINGLETON_CONTAINER_ID = 'cf-singleton-container-v-supervisor-12'
+const SINGLETON_CONTAINER_ID = 'cf-singleton-container-v-supervisor-13'
 
 export async function forwardRequestToContainer(request: Request) {
   const objectId = env.AGENT_CONTAINER.idFromName(SINGLETON_CONTAINER_ID)
