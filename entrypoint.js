@@ -162,6 +162,34 @@ function approveAllPending() {
   return results
 }
 
+function getDashboardLink() {
+  if (!globalExecutable) return 'OpenClaw not initialized'
+  try {
+    const res = cp.spawnSync(
+      globalExecutable.cmd,
+      [
+        ...globalExecutable.args,
+        'dashboard',
+        '--no-open',
+      ],
+      {
+        cwd: globalWorkspaceDir,
+        env: {
+          ...process.env,
+          OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
+        },
+        encoding: 'utf8',
+        timeout: 5000,
+      },
+    )
+    let out = ((res.stdout || '') + '\n' + (res.stderr || '')).trim()
+    out = out.replace(/https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/g, WORKER_URL)
+    return out
+  } catch (err) {
+    return `Error generating dashboard link: ${err.message}`
+  }
+}
+
 function getCleanHeaders(incomingHeaders) {
   const clean = {}
   const forbidden = new Set([
@@ -274,6 +302,8 @@ const server = http.createServer((req, res) => {
       } catch (err) {
         output += `Error listing devices: ${err.message}`
       }
+      const dashLink = getDashboardLink()
+      output += `\n\n=== ONE-TIME PAIRING DASHBOARD LINK ===\n${dashLink}\n`
     }
 
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
@@ -281,6 +311,13 @@ const server = http.createServer((req, res) => {
       `=== OPENCLAW DEVICE PAIRING & APPROVAL ===\n\n${output}\n\n=== RECENT LOGS ===\n` +
         logs.slice(-25).join('\n'),
     )
+  }
+
+  // One-time Dashboard Link endpoint
+  if (pathname === '/_dashboard' || pathname === '/_link') {
+    const link = getDashboardLink()
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+    return res.end(`=== OPENCLAW ONE-TIME DASHBOARD LINK ===\n\n${link}\n`)
   }
 
   if (isOpenClawReady) {
@@ -422,6 +459,7 @@ async function initializeAndLaunch() {
         },
         controlUi: {
           dangerouslyAllowHostHeaderOriginFallback: true,
+          allowInsecureAuth: true,
           allowedOrigins: [
             '*',
             WORKER_URL,
