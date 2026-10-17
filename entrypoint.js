@@ -40,15 +40,22 @@ const server = http.createServer((req, res) => {
   }
 
   if (isOpenClawReady) {
+    const clientIp = req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || '127.0.0.1';
+    const clientHost = req.headers.host || 'cloud-claw-final.dl-56e.workers.dev';
+    const proxyHeaders = {
+      ...req.headers,
+      host: clientHost,
+      'x-forwarded-for': clientIp,
+      'x-forwarded-proto': 'https',
+      'x-forwarded-host': clientHost,
+    };
+
     const proxyReq = http.request({
       hostname: '127.0.0.1',
       port: OPENCLAW_PORT,
       path: req.url,
       method: req.method,
-      headers: {
-        ...req.headers,
-        host: req.headers.host || `127.0.0.1:${OPENCLAW_PORT}`,
-      },
+      headers: proxyHeaders,
     }, (proxyRes) => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
@@ -86,9 +93,19 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
 
+  const clientIp = req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || '127.0.0.1';
+  const clientHost = req.headers.host || 'cloud-claw-final.dl-56e.workers.dev';
+  const headers = {
+    ...req.headers,
+    host: clientHost,
+    'x-forwarded-for': clientIp,
+    'x-forwarded-proto': 'https',
+    'x-forwarded-host': clientHost,
+  };
+
   const targetSocket = net.connect(OPENCLAW_PORT, '127.0.0.1', () => {
     let rawHeaders = `${req.method} ${req.url} HTTP/1.1\r\n`;
-    for (const [key, value] of Object.entries(req.headers)) {
+    for (const [key, value] of Object.entries(headers)) {
       if (Array.isArray(value)) {
         for (const v of value) rawHeaders += `${key}: ${v}\r\n`;
       } else if (value !== undefined) {
@@ -142,12 +159,20 @@ async function initializeAndLaunch() {
     process.env.OPENCLAW_WORKSPACE_DIR = workspaceDir;
     process.env.OPENCLAW_CONFIG_PATH = path.join(stateDir, 'openclaw.json');
 
-    // Create openclaw.json with valid current schema
+    // Create openclaw.json with valid current schema and trustedProxies
     const config = {
       gateway: {
         mode: 'local',
         bind: 'lan',
         port: OPENCLAW_PORT,
+        trustedProxies: [
+          '127.0.0.1',
+          '::1',
+          '::ffff:127.0.0.1',
+          '10.0.0.0/8',
+          '172.16.0.0/12',
+          '192.168.0.0/16',
+        ],
         auth: {
           mode: 'token',
           token: GATEWAY_TOKEN,
