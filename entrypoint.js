@@ -1,4 +1,5 @@
 const http = require('http')
+const https = require('https')
 const net = require('net')
 const fs = require('fs')
 const path = require('path')
@@ -8,6 +9,7 @@ const PORT = parseInt(process.env.PORT || '6658', 10)
 const OPENCLAW_PORT = 18789
 const WORKER_URL = process.env.WORKER_URL || 'https://cloud-claw-final.dl-56e.workers.dev'
 const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || 'cloud-claw'
+const N8N_CONTROL_PLANE_URL = process.env.N8N_CONTROL_PLANE_URL || 'https://ai-n8n-engineer-control-plane.dl-56e.workers.dev'
 
 const logs = []
 function log(msg) {
@@ -281,6 +283,31 @@ function getCleanHeaders(incomingHeaders) {
   return clean
 }
 
+function proxyToN8n(targetPath, method, req, res) {
+  const targetUrl = new URL(targetPath, N8N_CONTROL_PLANE_URL)
+  log(`[n8n proxy] Forwarding ${method} ${req.url} -> ${targetUrl.toString()}`)
+  const clientReq = https.request(targetUrl, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Cloud-Claw-Supervisor/1.0',
+    },
+  }, (clientRes) => {
+    res.writeHead(clientRes.statusCode, clientRes.headers)
+    clientRes.pipe(res)
+  })
+  clientReq.on('error', (err) => {
+    log(`[n8n proxy error] ${err.message}`)
+    res.writeHead(502, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: `N8N Control Plane unreachable: ${err.message}` }))
+  })
+  if (req.method === 'POST' || req.method === 'PUT') {
+    req.pipe(clientReq)
+  } else {
+    clientReq.end()
+  }
+}
+
 // 1. Start HTTP Server immediately so Cloudflare Containers probe succeeds instantly
 const server = http.createServer((req, res) => {
   const reqUrl = new URL(req.url, 'http://localhost')
@@ -354,6 +381,61 @@ const server = http.createServer((req, res) => {
     const link = getDashboardLink()
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
     return res.end(`=== OPENCLAW ONE-TIME DASHBOARD LINK ===\n\n${link}\n`)
+  }
+
+  // n8n Control Plane Integration Endpoints
+  if (pathname === '/_n8n' || pathname === '/_n8n/stats') {
+    return proxyToN8n('/api/v1/stats', 'GET', req, res)
+  }
+  if (pathname === '/_n8n/clients') {
+    return proxyToN8n('/api/v1/clients', req.method, req, res)
+  }
+  if (pathname.startsWith('/_n8n/webhooks/')) {
+    const clientId = pathname.replace('/_n8n/webhooks/', '')
+    return proxyToN8n(`/api/v1/clients/${clientId}/webhooks`, 'GET', req, res)
+  }
+  if (pathname.startsWith('/_n8n/executions/')) {
+    const clientId = pathname.replace('/_n8n/executions/', '')
+    return proxyToN8n(`/api/v1/clients/${clientId}/executions`, 'GET', req, res)
+  }
+  if (pathname === '/_n8n/trigger') {
+    let body = ''
+    req.on('data', (chunk) => { body += chunk })
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}')
+        const { workflowSlug, clientId, token, payload = {} } = parsed
+        if (!workflowSlug || !clientId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          return res.end(JSON.stringify({ error: 'workflowSlug and clientId are required' }))
+        }
+        const qs = token ? `?token=${encodeURIComponent(token)}` : ''
+        const triggerUrl = new URL(`/v1/webhooks/${workflowSlug}/${clientId}${qs}`, N8N_CONTROL_PLANE_URL)
+        const postData = JSON.stringify(payload)
+        log(`[n8n trigger] Dispatching to ${triggerUrl.toString()}`)
+        const trigReq = https.request(triggerUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData),
+          },
+        }, (trigRes) => {
+          res.writeHead(trigRes.statusCode, trigRes.headers)
+          trigRes.pipe(res)
+        })
+        trigReq.on('error', (err) => {
+          log(`[n8n trigger error] ${err.message}`)
+          res.writeHead(502, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `Failed to trigger workflow: ${err.message}` }))
+        })
+        trigReq.write(postData)
+        trigReq.end()
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: `Invalid JSON body: ${e.message}` }))
+      }
+    })
+    return
   }
 
   if (isOpenClawReady) {
@@ -537,6 +619,9 @@ async function initializeAndLaunch() {
 
     log(`Config written to ${path.join(stateDir, 'openclaw.json')}`)
 
+    // Auto-provision n8n Engineer Control Plane Skill
+    setupN8nSkill(workspaceDir, stateDir)
+
     // Find OpenClaw executable
     globalWorkspaceDir = workspaceDir
     const executable = findExecutable()
@@ -570,6 +655,84 @@ async function initializeAndLaunch() {
   } catch (err) {
     gatewayStatus = `init_error: ${err.message}`
     log(`Initialization error: ${err.stack || err.message}`)
+  }
+}
+
+function setupN8nSkill(workspaceDir, stateDir) {
+  const skillContent = `---
+name: n8n-engineer
+description: Multi-tenant n8n Workflow and Automation Control Plane for client deployments. Use to list workflows, trigger automations, inspect execution logs, onboard new clients, and check platform health.
+---
+
+# n8n Engineer Control Plane
+
+You have direct access to the multi-tenant n8n automation control plane running at:
+\`https://ai-n8n-engineer-control-plane.dl-56e.workers.dev\`
+
+## Available Operations
+
+### 1. List Clients
+Fetch all registered clients and their execution quotas:
+\`\`\`bash
+curl -s "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/clients"
+\`\`\`
+
+### 2. List Client Webhooks & Workflows
+Get all active webhook URLs for a specific client:
+\`\`\`bash
+curl -s "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/clients/<clientId>/webhooks"
+\`\`\`
+
+Available Workflow Slugs:
+- \`lead-capture-and-routing\`: Universal Lead Capture & Routing
+- \`sales-pipeline-follow-up\`: Sales Pipeline Stalled Deal Acceleration
+- \`crm-sync-and-deduplication\`: Bi-Directional CRM Sync & Deduplication
+- \`customer-support-triage\`: Customer Support Triage & SLA Router
+- \`appointment-booking-and-follow-up\`: Appointment Booking & Follow-Up
+- \`ai-content-approval-and-publishing\`: AI Content Approval & Publishing
+- \`document-approval-workflow\`: Document & Contract Approval
+- \`ecommerce-order-exception-handling\`: E-Commerce Order Exception Handling
+- \`employee-onboarding-and-offboarding\`: Employee Onboarding & Lifecycle
+- \`invoice-collections-follow-up\`: Automated Invoice Collections
+
+### 3. Trigger a Workflow
+Dispatch an event to an active client workflow:
+\`\`\`bash
+curl -X POST "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/v1/webhooks/<workflowSlug>/<clientId>?token=<webhookSecret>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"key": "value"}'
+\`\`\`
+
+### 4. Check Execution Logs & Status
+Query the execution history and duration metrics:
+\`\`\`bash
+curl -s "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/clients/<clientId>/executions"
+\`\`\`
+
+### 5. Onboard New Client
+Provision a new client tenant with all 10 enterprise workflows automatically:
+\`\`\`bash
+curl -X POST "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/clients" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name": "Client Name", "slug": "client-slug", "plan": "enterprise", "monthlyQuota": 25000}'
+\`\`\`
+
+### 6. Platform Stats
+Check overall system metrics across all clients:
+\`\`\`bash
+curl -s "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/stats"
+\`\`\`
+`
+
+  for (const base of [workspaceDir, path.join(stateDir, 'skills'), '/root/.openclaw/skills']) {
+    try {
+      const skillDir = path.join(base, 'skills', 'n8n-engineer')
+      fs.mkdirSync(skillDir, { recursive: true })
+      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), skillContent, 'utf8')
+      log(`[n8n-skill] Written skill to ${path.join(skillDir, 'SKILL.md')}`)
+    } catch (e) {
+      log(`[n8n-skill] Note: ${e.message}`)
+    }
   }
 }
 
