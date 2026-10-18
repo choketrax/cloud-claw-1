@@ -1,4 +1,5 @@
 # Use the official prebuilt OpenClaw slim image instead of compiling from source.
+# Build: unified-hub-v2
 FROM ghcr.io/openclaw/openclaw:slim
 
 ENV NODE_ENV=production
