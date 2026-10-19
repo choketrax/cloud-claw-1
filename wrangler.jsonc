@@ -21,6 +21,8 @@
   "vars": {
     "WORKER_URL": "https://cloud-claw-final.dl-56e.workers.dev",
     "OPENCLAW_GATEWAY_TOKEN": "cloud-claw",
+    "DISCOVERY_WORKER_URL": "https://prospecting-discovery.dl-56e.workers.dev",
+    "DISCOVERY_API_SECRET": "production-secret-123",
   },
   "browser": {
     "binding": "BROWSER",

@@ -12,6 +12,8 @@ declare namespace Cloudflare {
 		SERVER_PASSWORD: string;
 		WORKER_URL: string;
 		OPENCLAW_GATEWAY_TOKEN: string;
+		DISCOVERY_WORKER_URL: string;
+		DISCOVERY_API_SECRET: string;
 		S3_ENDPOINT: string;
 		S3_ACCESS_KEY_ID: string;
 		S3_SECRET_ACCESS_KEY: string;
@@ -25,7 +27,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "SERVER_USERNAME" | "SERVER_PASSWORD" | "WORKER_URL" | "OPENCLAW_GATEWAY_TOKEN" | "S3_ENDPOINT" | "S3_ACCESS_KEY_ID" | "S3_SECRET_ACCESS_KEY" | "S3_BUCKET" | "S3_PREFIX">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "SERVER_USERNAME" | "SERVER_PASSWORD" | "WORKER_URL" | "OPENCLAW_GATEWAY_TOKEN" | "DISCOVERY_WORKER_URL" | "DISCOVERY_API_SECRET" | "S3_ENDPOINT" | "S3_ACCESS_KEY_ID" | "S3_SECRET_ACCESS_KEY" | "S3_BUCKET" | "S3_PREFIX">> {}
 }
 
 // Begin runtime types

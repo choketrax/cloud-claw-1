@@ -9,7 +9,11 @@ const PORT = parseInt(process.env.PORT || '6658', 10)
 const OPENCLAW_PORT = 18789
 const WORKER_URL = process.env.WORKER_URL || 'https://cloud-claw-final.dl-56e.workers.dev'
 const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || 'cloud-claw'
-const N8N_CONTROL_PLANE_URL = process.env.N8N_CONTROL_PLANE_URL || 'https://ai-n8n-engineer-control-plane.dl-56e.workers.dev'
+const N8N_CONTROL_PLANE_URL =
+  process.env.N8N_CONTROL_PLANE_URL || 'https://ai-n8n-engineer-control-plane.dl-56e.workers.dev'
+const DISCOVERY_WORKER_URL =
+  process.env.DISCOVERY_WORKER_URL || 'https://prospecting-discovery.dl-56e.workers.dev'
+const DISCOVERY_API_SECRET = process.env.DISCOVERY_API_SECRET || 'production-secret-123'
 
 const logs = []
 function log(msg) {
@@ -93,12 +97,7 @@ function getPendingRequestIds() {
       '--token',
       GATEWAY_TOKEN,
     ],
-    [
-      ...globalExecutable.args,
-      'devices',
-      'list',
-      '--json',
-    ],
+    [...globalExecutable.args, 'devices', 'list', '--json'],
   ]
 
   for (const args of attempts) {
@@ -174,12 +173,7 @@ function approveAllPending() {
   try {
     cp.spawnSync(
       globalExecutable.cmd,
-      [
-        ...globalExecutable.args,
-        'devices',
-        'approve',
-        '--latest',
-      ],
+      [...globalExecutable.args, 'devices', 'approve', '--latest'],
       {
         cwd: globalWorkspaceDir,
         env: {
@@ -205,11 +199,7 @@ function getDashboardLink() {
   try {
     const res = cp.spawnSync(
       globalExecutable.cmd,
-      [
-        ...globalExecutable.args,
-        'dashboard',
-        '--no-open',
-      ],
+      [...globalExecutable.args, 'dashboard', '--no-open'],
       {
         cwd: globalWorkspaceDir,
         env: {
@@ -286,20 +276,55 @@ function getCleanHeaders(incomingHeaders) {
 function proxyToN8n(targetPath, method, req, res) {
   const targetUrl = new URL(targetPath, N8N_CONTROL_PLANE_URL)
   log(`[n8n proxy] Forwarding ${method} ${req.url} -> ${targetUrl.toString()}`)
-  const clientReq = https.request(targetUrl, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': 'Cloud-Claw-Supervisor/1.0',
+  const clientReq = https.request(
+    targetUrl,
+    {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Cloud-Claw-Supervisor/1.0',
+      },
     },
-  }, (clientRes) => {
-    res.writeHead(clientRes.statusCode, clientRes.headers)
-    clientRes.pipe(res)
-  })
+    (clientRes) => {
+      res.writeHead(clientRes.statusCode, clientRes.headers)
+      clientRes.pipe(res)
+    },
+  )
   clientReq.on('error', (err) => {
     log(`[n8n proxy error] ${err.message}`)
     res.writeHead(502, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: `N8N Control Plane unreachable: ${err.message}` }))
+  })
+  if (req.method === 'POST' || req.method === 'PUT') {
+    req.pipe(clientReq)
+  } else {
+    clientReq.end()
+  }
+}
+
+function proxyToDiscovery(targetPath, method, req, res) {
+  const targetUrl = new URL(targetPath, DISCOVERY_WORKER_URL)
+  log(`[discovery proxy] Forwarding ${method} ${req.url} -> ${targetUrl.toString()}`)
+  const headers = {
+    'Content-Type': 'application/json',
+    'User-Agent': 'Cloud-Claw-Supervisor/1.0',
+    Authorization: `Bearer ${DISCOVERY_API_SECRET}`,
+  }
+  const clientReq = https.request(
+    targetUrl,
+    {
+      method,
+      headers,
+    },
+    (clientRes) => {
+      res.writeHead(clientRes.statusCode, clientRes.headers)
+      clientRes.pipe(res)
+    },
+  )
+  clientReq.on('error', (err) => {
+    log(`[discovery proxy error] ${err.message}`)
+    res.writeHead(502, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: `Discovery Worker unreachable: ${err.message}` }))
   })
   if (req.method === 'POST' || req.method === 'PUT') {
     req.pipe(clientReq)
@@ -400,7 +425,9 @@ const server = http.createServer((req, res) => {
   }
   if (pathname === '/_n8n/trigger') {
     let body = ''
-    req.on('data', (chunk) => { body += chunk })
+    req.on('data', (chunk) => {
+      body += chunk
+    })
     req.on('end', () => {
       try {
         const parsed = JSON.parse(body || '{}')
@@ -410,19 +437,26 @@ const server = http.createServer((req, res) => {
           return res.end(JSON.stringify({ error: 'workflowSlug and clientId are required' }))
         }
         const qs = token ? `?token=${encodeURIComponent(token)}` : ''
-        const triggerUrl = new URL(`/v1/webhooks/${workflowSlug}/${clientId}${qs}`, N8N_CONTROL_PLANE_URL)
+        const triggerUrl = new URL(
+          `/v1/webhooks/${workflowSlug}/${clientId}${qs}`,
+          N8N_CONTROL_PLANE_URL,
+        )
         const postData = JSON.stringify(payload)
         log(`[n8n trigger] Dispatching to ${triggerUrl.toString()}`)
-        const trigReq = https.request(triggerUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(postData),
+        const trigReq = https.request(
+          triggerUrl,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(postData),
+            },
           },
-        }, (trigRes) => {
-          res.writeHead(trigRes.statusCode, trigRes.headers)
-          trigRes.pipe(res)
-        })
+          (trigRes) => {
+            res.writeHead(trigRes.statusCode, trigRes.headers)
+            trigRes.pipe(res)
+          },
+        )
         trigReq.on('error', (err) => {
           log(`[n8n trigger error] ${err.message}`)
           res.writeHead(502, { 'Content-Type': 'application/json' })
@@ -436,6 +470,21 @@ const server = http.createServer((req, res) => {
       }
     })
     return
+  }
+
+  // Prospect Discovery Engine Integration Endpoints
+  if (pathname === '/_discovery/run' && req.method === 'POST') {
+    return proxyToDiscovery('/discovery/run', 'POST', req, res)
+  }
+  if (pathname === '/_discovery/prospects') {
+    return proxyToDiscovery(`/discovery/prospects${reqUrl.search}`, 'GET', req, res)
+  }
+  if (pathname === '/_discovery/feedback' && req.method === 'POST') {
+    return proxyToDiscovery('/discovery/feedback', 'POST', req, res)
+  }
+  if (pathname.startsWith('/_discovery/run/')) {
+    const runId = pathname.replace('/_discovery/run/', '')
+    return proxyToDiscovery(`/discovery/run/${runId}`, 'GET', req, res)
   }
 
   if (isOpenClawReady) {
@@ -468,7 +517,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8',
       'Retry-After': '5',
-      'Refresh': '5',
+      Refresh: '5',
     })
     res.end(
       `OpenClaw Gateway status: [${gatewayStatus}]\n` +
@@ -622,6 +671,9 @@ async function initializeAndLaunch() {
     // Auto-provision n8n Engineer Control Plane Skill
     setupN8nSkill(workspaceDir, stateDir)
 
+    // Auto-provision B2B Prospect Discovery Engine Skill
+    setupDiscoverySkill(workspaceDir, stateDir)
+
     // Find OpenClaw executable
     globalWorkspaceDir = workspaceDir
     const executable = findExecutable()
@@ -732,6 +784,87 @@ curl -s "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/stats"
       log(`[n8n-skill] Written skill to ${path.join(skillDir, 'SKILL.md')}`)
     } catch (e) {
       log(`[n8n-skill] Note: ${e.message}`)
+    }
+  }
+}
+
+function setupDiscoverySkill(workspaceDir, stateDir) {
+  const skillContent = `---
+name: prospect-discovery
+description: Production B2B Prospect Discovery Engine. Use to trigger autonomous ICP discovery runs, check discovery status, list qualified prospects with evidence, and record operator feedback.
+---
+
+# B2B Prospect Discovery Engine
+
+You have direct access to the autonomous Prospect Discovery Engine running via the internal supervisor proxy:
+\`http://127.0.0.1:${PORT}/_discovery\`
+
+All calls through this proxy automatically authenticate with the discovery worker using server-side credentials.
+
+## Available Operations
+
+### 1. Trigger an ICP Discovery Run
+Start a background discovery pipeline by providing an Ideal Customer Profile:
+\`\`\`bash
+curl -X POST "http://127.0.0.1:${PORT}/_discovery/run" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "icp": {
+      "product": "AI Infrastructure Cost Audit",
+      "offer": "Cut inference and LLM pipeline costs by 30-50%",
+      "targetMarket": "B2B SaaS companies building generative AI features",
+      "idealCustomer": "VP of Engineering, CTO, or Head of AI with high token volume",
+      "geography": "US, Canada, UK, EU",
+      "negativeCriteria": ["consulting agencies", "pre-revenue startups", "crypto/web3"]
+    },
+    "maxResults": 50,
+    "concurrency": 5,
+    "minQualificationScore": 60,
+    "fullEnrichmentScore": 85,
+    "maxDiscoveryCostPerRun": 5.00
+  }'
+\`\`\`
+Returns: \`{"runId": "<uuid>", "status": "started"}\`
+
+### 2. Check Discovery Run Status & Summary
+Poll the status and cost telemetry of a running or completed discovery job:
+\`\`\`bash
+curl -s "http://127.0.0.1:${PORT}/_discovery/run/<runId>"
+\`\`\`
+
+### 3. List Discovered & Qualified Prospects
+Retrieve prospects ranked by multi-factor score (ICP fit, pain strength, timing, evidence quality, reachability, commercial value):
+\`\`\`bash
+curl -s "http://127.0.0.1:${PORT}/_discovery/prospects?minScore=60&limit=20"
+\`\`\`
+Supported query parameters:
+- \`status\`: Filter by lifecycle state (\`new\`, \`qualified\`, \`rejected\`, \`queued\`, \`contacted\`, \`customer\`, etc.)
+- \`minScore\`: Minimum overall score from 0-100 (e.g. \`70\`)
+- \`limit\`: Number of prospects to return (e.g. \`20\`)
+- \`offset\`: Pagination offset
+
+### 4. Record Operator Feedback
+Provide human feedback on a prospect to refine future search queries and model preferences:
+\`\`\`bash
+curl -X POST "http://127.0.0.1:${PORT}/_discovery/feedback" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "prospectId": "<prospectId>",
+    "verdict": "KEEP",
+    "reason": "Owner-operated AI SaaS with clear inference spend"
+  }'
+\`\`\`
+Verdicts: \`KEEP\`, \`MAYBE\`, \`REJECT\`
+`
+
+  for (const base of [workspaceDir, path.join(stateDir, 'skills'), '/root/.openclaw/skills']) {
+    try {
+      const skillDir = path.join(base, 'skills', 'prospect-discovery')
+      fs.mkdirSync(skillDir, { recursive: true })
+      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), skillContent, 'utf8')
+      log(`[discovery-skill] Written skill to ${path.join(skillDir, 'SKILL.md')}`)
+    } catch (e) {
+      log(`[discovery-skill] Note: ${e.message}`)
     }
   }
 }
