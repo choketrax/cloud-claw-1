@@ -8,7 +8,7 @@ const containerEnv = Object.fromEntries(
 )
 
 export class AgentContainer extends Container {
-  sleepAfter = '2h'
+  sleepAfter = '30m'
   defaultPort = PORT
 
   envVars = {
@@ -62,8 +62,8 @@ export class AgentContainer extends Container {
           id: '1',
           method: 'connect',
           params: {
-            minProtocol: 3,
-            maxProtocol: 3,
+            minProtocol: 4,
+            maxProtocol: 4,
             client: { id: 'cli', version: '1.0.0', platform: 'cloudflare', mode: 'cli' },
             role: 'operator',
             scopes: ['operator.read'],
@@ -86,7 +86,7 @@ export class AgentContainer extends Container {
   }
 }
 
-const SINGLETON_CONTAINER_ID = 'cf-singleton-container-v-unified-hub-2'
+const SINGLETON_CONTAINER_ID = 'cf-singleton-container-silent-2'
 
 export async function forwardRequestToContainer(request: Request) {
   const objectId = env.AGENT_CONTAINER.idFromName(SINGLETON_CONTAINER_ID)

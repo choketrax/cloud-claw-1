@@ -107,24 +107,6 @@ async function handleFetch(request: Request) {
     return new Response('Unauthorized', { status: 401, headers })
   }
 
-  // Direct Worker-level Discovery Proxy (bypasses container dependency)
-  if (url.pathname.startsWith('/_discovery/')) {
-    const discoveryTargetUrl = new URL(
-      url.pathname.replace('/_discovery', '/discovery') + url.search,
-      env.DISCOVERY_WORKER_URL || 'https://prospecting-discovery.dl-56e.workers.dev',
-    )
-    const discoveryHeaders = new Headers(request.headers)
-    discoveryHeaders.set(
-      'Authorization',
-      `Bearer ${env.DISCOVERY_API_SECRET || 'production-secret-123'}`,
-    )
-    discoveryHeaders.set('User-Agent', 'Cloud-Claw-Worker/1.0')
-    return fetch(discoveryTargetUrl.toString(), {
-      method: request.method,
-      headers: discoveryHeaders,
-      body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
-    })
-  }
 
   // If user visits any UI document page via browser without ?token=, redirect to include the gateway token
   // so the Control UI automatically ingests and persists it into sessionStorage!
@@ -135,9 +117,7 @@ async function handleFetch(request: Request) {
 
   if (
     isDocumentNavigation &&
-    !url.pathname.startsWith('/assets/') &&
-    !url.pathname.startsWith('/cloudflare.browser') &&
-    !url.pathname.startsWith('/_') &&
+    (url.pathname === '/' || url.pathname.startsWith('/chat')) &&
     !url.searchParams.has('token')
   ) {
     const gatewayToken = env.OPENCLAW_GATEWAY_TOKEN || 'cloud-claw'
@@ -154,7 +134,14 @@ async function handleFetch(request: Request) {
     })
   }
 
-  const response = await forwardRequestToContainer(request)
+  let reqToForward = request
+  if (url.pathname !== '/' && url.searchParams.has('token')) {
+    const cleanUrl = new URL(request.url)
+    cleanUrl.searchParams.delete('token')
+    reqToForward = new Request(cleanUrl.toString(), request)
+  }
+
+  const response = await forwardRequestToContainer(reqToForward)
 
   // If newly authenticated via Basic Auth or token, attach Set-Cookie
   if (auth.setCookie) {

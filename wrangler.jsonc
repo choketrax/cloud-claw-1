@@ -32,7 +32,9 @@
     {
       "name": "cloud-claw-container-final",
       "class_name": "AgentContainer",
-      "image": "./Dockerfile",
+      "image": "registry.cloudflare.com/56e8d68c2c46720b0d77df12d63da7e2/cloud-claw-container-final:silent2",
+      "rollout_step_percentage": 100,
+      "rollout_active_grace_period": 0,
       "instance_type": {
         "vcpu": 1,
         "memory_mib": 4096,

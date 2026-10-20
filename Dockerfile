@@ -13,3 +13,4 @@ WORKDIR /data/workspace
 EXPOSE 6658
 
 ENTRYPOINT ["node", "/entrypoint.js"]
+

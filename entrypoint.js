@@ -146,76 +146,36 @@ function getPendingRequestIds() {
   return Array.from(ids)
 }
 
-function approveAllPending() {
-  if (!globalExecutable || !isOpenClawReady) return []
-
-  // 1. Instantly approve the latest pairing request if any
-  try {
-    cp.spawnSync(
-      globalExecutable.cmd,
-      [
-        ...globalExecutable.args,
-        'devices',
-        'approve',
-        '--latest',
-        '--url',
-        `ws://127.0.0.1:${OPENCLAW_PORT}`,
-        '--token',
-        GATEWAY_TOKEN,
-      ],
-      {
-        cwd: globalWorkspaceDir,
-        env: process.env,
-        timeout: 3000,
-      },
-    )
-  } catch {}
-  try {
-    cp.spawnSync(
-      globalExecutable.cmd,
-      [...globalExecutable.args, 'devices', 'approve', '--latest'],
-      {
-        cwd: globalWorkspaceDir,
-        env: {
-          ...process.env,
-          OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
-        },
-        timeout: 3000,
-      },
-    )
-  } catch {}
-
-  const ids = getPendingRequestIds()
-  const results = []
-  for (const id of ids) {
-    const res = approveDevice(id)
-    results.push({ id, res })
-  }
-  return results
+function approveLatestAsync() {
+  if (!globalExecutable || !isOpenClawReady) return
+  log(`[approveLatestAsync] Triggering async --latest approval`)
+  cp.execFile(
+    globalExecutable.cmd,
+    [
+      ...globalExecutable.args,
+      'devices',
+      'approve',
+      '--latest',
+      '--url',
+      `ws://127.0.0.1:${OPENCLAW_PORT}`,
+      '--token',
+      GATEWAY_TOKEN,
+    ],
+    {
+      cwd: globalWorkspaceDir,
+      env: process.env,
+      timeout: 15000,
+    },
+    (err, stdout, stderr) => {
+      const out = ((stdout || '') + ' ' + (stderr || '')).trim()
+      log(`[approveLatestAsync] exit=${err ? err.code || 1 : 0} out=${out}`)
+    },
+  )
 }
 
 function getDashboardLink() {
   if (!globalExecutable) return 'OpenClaw not initialized'
-  try {
-    const res = cp.spawnSync(
-      globalExecutable.cmd,
-      [...globalExecutable.args, 'dashboard', '--no-open'],
-      {
-        cwd: globalWorkspaceDir,
-        env: {
-          ...process.env,
-          OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
-        },
-        encoding: 'utf8',
-        timeout: 5000,
-      },
-    )
-    let out = ((res.stdout || '') + '\n' + (res.stderr || '')).trim()
-    out = out.replace(/https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/g, WORKER_URL)
-    return out
-  } catch (err) {
-    return `Error generating dashboard link: ${err.message}`
-  }
+  return `${WORKER_URL}/?token=${GATEWAY_TOKEN}`
 }
 
 function getCleanHeaders(incomingHeaders) {
@@ -232,30 +192,12 @@ function getCleanHeaders(incomingHeaders) {
     'authorization', // Do not forward Worker Basic Auth to OpenClaw
   ])
 
-  // Extract or synthesize a valid non-loopback client IP for OpenClaw trusted-proxy attribution
-  let clientIp =
-    incomingHeaders['cf-connecting-ip'] ||
-    (typeof incomingHeaders['x-forwarded-for'] === 'string'
-      ? incomingHeaders['x-forwarded-for'].split(',')[0].trim()
-      : undefined) ||
-    incomingHeaders['x-real-ip'] ||
-    '1.1.1.1'
-
-  if (
-    !clientIp ||
-    clientIp.startsWith('127.') ||
-    clientIp === '::1' ||
-    clientIp === 'localhost' ||
-    clientIp === 'unknown'
-  ) {
-    clientIp = '1.1.1.1'
-  }
-
   for (const [key, value] of Object.entries(incomingHeaders)) {
     const lower = key.toLowerCase()
     if (
       lower.startsWith('x-forwarded-') ||
       lower.startsWith('cf-') ||
+      lower.startsWith('tailscale-') ||
       forbidden.has(lower) ||
       lower === 'host'
     ) {
@@ -265,11 +207,6 @@ function getCleanHeaders(incomingHeaders) {
   }
 
   clean['host'] = `127.0.0.1:${OPENCLAW_PORT}`
-  clean['x-forwarded-for'] = clientIp
-  clean['x-forwarded-proto'] = 'https'
-  clean['x-forwarded-user'] = 'agili'
-  clean['x-openclaw-scopes'] =
-    'operator.read,operator.write,operator.approvals,operator.questions,operator.admin'
   return clean
 }
 
@@ -350,53 +287,25 @@ const server = http.createServer((req, res) => {
     return res.end(`Status: ${gatewayStatus}\n\n=== RECENT LOGS ===\n` + logs.join('\n'))
   }
 
-  // Device approval endpoint
+  // Device approval endpoint (non-blocking)
   if (pathname === '/_approve' || pathname === '/_devices') {
     if (!globalExecutable) {
       res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' })
       return res.end('OpenClaw executable not initialized yet')
     }
     const id = reqUrl.searchParams.get('id')
-    let output = ''
     if (id) {
-      output = `Approving requested ID [${id}]:\n` + approveDevice(id)
+      approveDevice(id)
     } else {
-      const approved = approveAllPending()
-      output = `Auto-approved pending devices: ${JSON.stringify(approved, null, 2)}\n\n`
-
-      try {
-        const listRes = cp.spawnSync(
-          globalExecutable.cmd,
-          [
-            ...globalExecutable.args,
-            'devices',
-            'list',
-            '--url',
-            `ws://127.0.0.1:${OPENCLAW_PORT}`,
-            '--token',
-            GATEWAY_TOKEN,
-          ],
-          {
-            cwd: globalWorkspaceDir,
-            env: {
-              ...process.env,
-              OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
-            },
-            encoding: 'utf8',
-            timeout: 5000,
-          },
-        )
-        output += `Current Device List:\n${listRes.stdout || ''}\n${listRes.stderr || ''}`
-      } catch (err) {
-        output += `Error listing devices: ${err.message}`
-      }
-      const dashLink = getDashboardLink()
-      output += `\n\n=== ONE-TIME PAIRING DASHBOARD LINK ===\n${dashLink}\n`
+      approveLatestAsync()
     }
-
+    const dashLink = getDashboardLink()
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
     return res.end(
-      `=== OPENCLAW DEVICE PAIRING & APPROVAL ===\n\n${output}\n\n=== RECENT LOGS ===\n` +
+      `=== OPENCLAW DEVICE PAIRING & APPROVAL ===\n\n` +
+        `Triggered async approval for: ${id || '--latest'}\n` +
+        `Dashboard URL: ${dashLink}\n\n` +
+        `=== RECENT LOGS ===\n` +
         logs.slice(-25).join('\n'),
     )
   }
@@ -414,6 +323,16 @@ const server = http.createServer((req, res) => {
   }
   if (pathname === '/_n8n/clients') {
     return proxyToN8n('/api/v1/clients', req.method, req, res)
+  }
+  if (pathname === '/_n8n/workflows/build' && req.method === 'POST') {
+    return proxyToN8n('/api/v1/workflows/build', 'POST', req, res)
+  }
+  if (pathname === '/_n8n/workflows') {
+    return proxyToN8n('/api/v1/workflows', req.method, req, res)
+  }
+  if (pathname.startsWith('/_n8n/workflows/')) {
+    const rest = pathname.replace('/_n8n/workflows/', '')
+    return proxyToN8n(`/api/v1/workflows/${rest}`, req.method, req, res)
   }
   if (pathname.startsWith('/_n8n/webhooks/')) {
     const clientId = pathname.replace('/_n8n/webhooks/', '')
@@ -490,11 +409,18 @@ const server = http.createServer((req, res) => {
   if (isOpenClawReady) {
     const cleanHeaders = getCleanHeaders(req.headers)
 
+    let targetPath = reqUrl.pathname + reqUrl.search
+    if (reqUrl.pathname !== '/' && reqUrl.searchParams.has('token')) {
+      const sanitized = new URL(reqUrl.toString())
+      sanitized.searchParams.delete('token')
+      targetPath = sanitized.pathname + sanitized.search
+    }
+
     const proxyReq = http.request(
       {
         hostname: '127.0.0.1',
         port: OPENCLAW_PORT,
-        path: reqUrl.pathname + reqUrl.search,
+        path: targetPath,
         method: req.method,
         headers: cleanHeaders,
       },
@@ -530,52 +456,83 @@ const server = http.createServer((req, res) => {
 
 // WebSocket proxy for OpenClaw Gateway / UI
 server.on('upgrade', (req, socket, head) => {
-  if (!isOpenClawReady) {
-    log(`WS upgrade requested while OpenClaw not ready (status: ${gatewayStatus})`)
-    socket.destroy()
-    return
-  }
-
   // Pause socket until target connection is established to avoid data frame drop
   socket.pause()
 
-  const cleanHeaders = getCleanHeaders(req.headers)
-  log(`WS upgrade: ${req.method} ${req.url} clientIp=${cleanHeaders['x-forwarded-for']}`)
+  const connectToOpenClaw = () => {
+    const cleanHeaders = getCleanHeaders(req.headers)
+    log(`WS upgrade: ${req.method} ${req.url} -> direct-local`)
 
-  const targetSocket = net.connect(OPENCLAW_PORT, '127.0.0.1', () => {
-    let targetUrl = req.url
-    if (!targetUrl.includes('token=')) {
-      targetUrl += (targetUrl.includes('?') ? '&' : '?') + `token=${GATEWAY_TOKEN}`
-    }
-    let rawHeaders = `${req.method} ${targetUrl} HTTP/1.1\r\n`
-    for (const [key, value] of Object.entries(cleanHeaders)) {
-      if (Array.isArray(value)) {
-        for (const v of value) rawHeaders += `${key}: ${v}\r\n`
-      } else if (value !== undefined) {
-        rawHeaders += `${key}: ${value}\r\n`
+    const targetSocket = net.connect(OPENCLAW_PORT, '127.0.0.1', () => {
+      let targetUrl = req.url
+      if (!targetUrl.includes('token=')) {
+        targetUrl += (targetUrl.includes('?') ? '&' : '?') + `token=${GATEWAY_TOKEN}`
       }
-    }
-    rawHeaders += '\r\n'
+      let rawHeaders = `${req.method} ${targetUrl} HTTP/1.1\r\n`
+      for (const [key, value] of Object.entries(cleanHeaders)) {
+        if (Array.isArray(value)) {
+          for (const v of value) rawHeaders += `${key}: ${v}\r\n`
+        } else if (value !== undefined) {
+          rawHeaders += `${key}: ${value}\r\n`
+        }
+      }
+      rawHeaders += '\r\n'
 
-    targetSocket.write(rawHeaders)
-    if (head && head.length > 0) {
-      targetSocket.write(head)
-    }
+      targetSocket.write(rawHeaders)
+      if (head && head.length > 0) {
+        targetSocket.write(head)
+      }
 
-    socket.pipe(targetSocket)
-    targetSocket.pipe(socket)
-    socket.resume()
-  })
+      // Inspect outgoing server->client WS frames for NOT_PAIRED / requestId as a fallback
+      targetSocket.on('data', (chunk) => {
+        try {
+          const str = chunk.toString('utf8')
+          if (str.includes('NOT_PAIRED') || str.includes('pairing required')) {
+            const m = str.match(/"requestId"\s*:\s*"([a-f0-9-]{8,})"/i)
+            if (m && m[1]) {
+              log(`[ws-sniffer] Detected NOT_PAIRED frame with requestId=${m[1]}, auto-approving!`)
+              approveDevice(m[1])
+            } else {
+              log(`[ws-sniffer] Detected NOT_PAIRED frame, triggering --latest approval!`)
+              approveLatestAsync()
+            }
+          }
+        } catch {}
+      })
 
-  targetSocket.on('error', (err) => {
-    log(`WS target socket error: ${err.message}`)
-    socket.destroy()
-  })
+      socket.pipe(targetSocket)
+      targetSocket.pipe(socket)
+      socket.resume()
+    })
 
-  socket.on('error', (err) => {
-    log(`WS client socket error: ${err.message}`)
-    targetSocket.destroy()
-  })
+    targetSocket.on('error', (err) => {
+      log(`WS target socket error: ${err.message}`)
+      socket.destroy()
+    })
+
+    socket.on('error', (err) => {
+      log(`WS client socket error: ${err.message}`)
+      targetSocket.destroy()
+    })
+  }
+
+  if (isOpenClawReady) {
+    connectToOpenClaw()
+  } else {
+    log(`WS upgrade requested while OpenClaw not ready (status: ${gatewayStatus}), waiting up to 20s...`)
+    let attempts = 0
+    const interval = setInterval(() => {
+      attempts++
+      if (isOpenClawReady) {
+        clearInterval(interval)
+        connectToOpenClaw()
+      } else if (attempts >= 40) {
+        clearInterval(interval)
+        log(`WS upgrade timed out waiting for OpenClaw ready`)
+        socket.destroy()
+      }
+    }, 500)
+  }
 })
 
 server.listen(PORT, '0.0.0.0', () => {
@@ -588,9 +545,16 @@ async function initializeAndLaunch() {
   try {
     const stateDir = '/data'
     const workspaceDir = '/data/workspace'
+    const compileCacheDir = '/var/tmp/openclaw-compile-cache'
 
     // Ensure directories exist
-    for (const dir of [stateDir, workspaceDir, '/home/node/.openclaw', '/root/.openclaw']) {
+    for (const dir of [
+      stateDir,
+      workspaceDir,
+      '/home/node/.openclaw',
+      '/root/.openclaw',
+      compileCacheDir,
+    ]) {
       try {
         fs.mkdirSync(dir, { recursive: true })
       } catch (e) {
@@ -598,40 +562,55 @@ async function initializeAndLaunch() {
       }
     }
 
+    // Patch OpenClaw bundle for 0ms inline silent pairing of Control UI / Operator browsers
+    try {
+      const distDir = '/app/dist'
+      if (fs.existsSync(distDir)) {
+        for (const f of fs.readdirSync(distDir)) {
+          if (!f.endsWith('.mjs')) continue
+          const p = path.join(distDir, f)
+          let c = fs.readFileSync(p, 'utf8')
+          let modified = false
+          const target1 = 'function resolveLocalPairingApproval(params) {'
+          const patch1 =
+            'function resolveLocalPairingApproval(params) {\n\tif (params?.state?.isControlUi || params?.state?.isWebchat || params?.state?.role === "operator") return "silent";'
+          if (c.includes(target1) && !c.includes('params?.state?.isControlUi || params?.state?.isWebchat')) {
+            c = c.replace(target1, patch1)
+            modified = true
+          }
+          const target2 = 'function shouldAllowSilentLocalPairing(params) {'
+          const patch2 =
+            'function shouldAllowSilentLocalPairing(params) {\n\tif (params?.isControlUi || params?.isWebchat) return true;'
+          if (c.includes(target2) && !c.includes('if (params?.isControlUi || params?.isWebchat) return true;')) {
+            c = c.replace(target2, patch2)
+            modified = true
+          }
+          if (modified) {
+            fs.writeFileSync(p, c, 'utf8')
+            log(`[silent-pairing] Patched ${p} for instant 0ms Control UI pairing`)
+          }
+        }
+      }
+    } catch (e) {
+      log(`[silent-pairing] Warning patching dist: ${e.message}`)
+    }
+
     // Set process env
     process.env.OPENCLAW_STATE_DIR = stateDir
     process.env.OPENCLAW_WORKSPACE_DIR = workspaceDir
     process.env.OPENCLAW_CONFIG_PATH = path.join(stateDir, 'openclaw.json')
+    process.env.NODE_COMPILE_CACHE = compileCacheDir
+    process.env.OPENCLAW_NO_RESPAWN = '1'
 
-    // Create openclaw.json with valid current schema and trustedProxies
+    // Create strictly validated openclaw.json (no retired keys, so no 30s doctor --fix needed!)
     const config = {
       gateway: {
         mode: 'local',
         bind: 'lan',
         port: OPENCLAW_PORT,
-        trustedProxies: ['127.0.0.1', '::ffff:127.0.0.1', '::1'],
-        nodes: {
-          pairing: {
-            autoApproveLocal: true,
-          },
-        },
         auth: {
           mode: 'token',
           token: GATEWAY_TOKEN,
-          trustedProxy: {
-            userHeader: 'x-forwarded-user',
-            allowLoopback: true,
-            deviceAutoApprove: {
-              enabled: true,
-              scopes: [
-                'operator.read',
-                'operator.write',
-                'operator.approvals',
-                'operator.questions',
-                'operator.admin',
-              ],
-            },
-          },
         },
         controlUi: {
           dangerouslyAllowHostHeaderOriginFallback: true,
@@ -654,6 +633,47 @@ async function initializeAndLaunch() {
           cloudflare: {
             cdpUrl: `${WORKER_URL}/cloudflare.browser/${GATEWAY_TOKEN}`,
             driver: 'openclaw',
+          },
+        },
+      },
+      tools: {
+        profile: 'coding',
+        allow: ['*'],
+      },
+      models: {
+        mode: 'merge',
+        providers: {
+          freellmapi: {
+            baseUrl: 'https://weights-weekly-recognized-pixel.trycloudflare.com/v1',
+            apiKey: 'freellmapi-2de4a19794bfd86bb9883f2b020bd8ff0c0ac5f14cba8cd5',
+            api: 'openai-completions',
+            models: [
+              {
+                id: 'auto',
+                name: 'FreeLLMAPI Auto Router',
+                contextWindow: 16000,
+                maxTokens: 1024,
+              },
+              {
+                id: 'openai/gpt-oss-120b',
+                name: 'GPT OSS 120B (Groq)',
+                contextWindow: 16000,
+                maxTokens: 1024,
+              },
+              {
+                id: 'openai/gpt-oss-20b',
+                name: 'GPT OSS 20B (Groq)',
+                contextWindow: 16000,
+                maxTokens: 1024,
+              },
+            ],
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: 'freellmapi/auto',
           },
         },
       },
@@ -685,24 +705,6 @@ async function initializeAndLaunch() {
       return
     }
 
-    // Run openclaw doctor --fix to sanitize config schema if needed
-    try {
-      log('Running openclaw doctor --fix...')
-      const docRes = cp.spawnSync(
-        executable.cmd,
-        [...executable.args, 'doctor', '--fix', '--yes'],
-        {
-          cwd: workspaceDir,
-          env: { ...process.env, PORT: OPENCLAW_PORT.toString() },
-          encoding: 'utf8',
-          timeout: 15000,
-        },
-      )
-      if (docRes.stdout) log(`[doctor stdout] ${docRes.stdout.trim()}`)
-    } catch (e) {
-      log(`openclaw doctor error: ${e.message}`)
-    }
-
     launchGateway(executable, workspaceDir)
   } catch (err) {
     gatewayStatus = `init_error: ${err.message}`
@@ -713,29 +715,54 @@ async function initializeAndLaunch() {
 function setupN8nSkill(workspaceDir, stateDir) {
   const skillContent = `---
 name: n8n-engineer
-description: Multi-tenant n8n Workflow and Automation Control Plane for client deployments. Use to list workflows, trigger automations, inspect execution logs, onboard new clients, and check platform health.
+description: Multi-tenant n8n Workflow Builder and Automation Control Plane. Use to build new n8n workflows from natural language specs, export n8n JSON, list workflows, trigger automations, inspect execution logs, and onboard clients.
 ---
 
-# n8n Engineer Control Plane
+# n8n Engineer Control Plane & Workflow Builder
 
-You have direct access to the multi-tenant n8n automation control plane running at:
+You have direct access to the multi-tenant n8n automation control plane and deterministic workflow builder running at:
 \`https://ai-n8n-engineer-control-plane.dl-56e.workers.dev\`
+(or locally via \`http://127.0.0.1:${PORT}/_n8n\`)
 
 ## Available Operations
 
-### 1. List Clients
+### 1. Build a New Custom n8n Workflow (Deterministic Builder)
+Build, validate, and register a brand-new n8n workflow (returns complete importable n8n JSON + live webhook endpoints):
+\`\`\`bash
+curl -s -X POST "http://127.0.0.1:${PORT}/_n8n/workflows/build" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "name": "Custom Lead Enrichment & Slack Alert",
+    "description": "Enriches incoming webhook leads and posts high-score prospects to Slack",
+    "category": "sales",
+    "triggerType": "webhook",
+    "steps": [
+      {"name": "Enrich Company", "type": "http", "url": "https://api.company.com/enrich", "method": "POST"},
+      {"name": "Check Score", "type": "if"},
+      {"name": "Alert Sales Channel", "type": "slack", "channel": "#sales-alerts"}
+    ]
+  }'
+\`\`\`
+
+### 2. List All Workflow Templates & Export n8n JSON
+\`\`\`bash
+curl -s "http://127.0.0.1:${PORT}/_n8n/workflows"
+curl -s "http://127.0.0.1:${PORT}/_n8n/workflows/<workflowIdOrSlug>/json"
+\`\`\`
+
+### 3. List Clients
 Fetch all registered clients and their execution quotas:
 \`\`\`bash
 curl -s "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/clients"
 \`\`\`
 
-### 2. List Client Webhooks & Workflows
+### 4. List Client Webhooks & Workflows
 Get all active webhook URLs for a specific client:
 \`\`\`bash
 curl -s "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/clients/<clientId>/webhooks"
 \`\`\`
 
-Available Workflow Slugs:
+Available Built-In Workflow Slugs:
 - \`lead-capture-and-routing\`: Universal Lead Capture & Routing
 - \`sales-pipeline-follow-up\`: Sales Pipeline Stalled Deal Acceleration
 - \`crm-sync-and-deduplication\`: Bi-Directional CRM Sync & Deduplication
@@ -747,7 +774,7 @@ Available Workflow Slugs:
 - \`employee-onboarding-and-offboarding\`: Employee Onboarding & Lifecycle
 - \`invoice-collections-follow-up\`: Automated Invoice Collections
 
-### 3. Trigger a Workflow
+### 5. Trigger a Workflow
 Dispatch an event to an active client workflow:
 \`\`\`bash
 curl -X POST "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/v1/webhooks/<workflowSlug>/<clientId>?token=<webhookSecret>" \\
@@ -755,21 +782,21 @@ curl -X POST "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/v1/webhoo
   -d '{"key": "value"}'
 \`\`\`
 
-### 4. Check Execution Logs & Status
+### 6. Check Execution Logs & Status
 Query the execution history and duration metrics:
 \`\`\`bash
 curl -s "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/clients/<clientId>/executions"
 \`\`\`
 
-### 5. Onboard New Client
-Provision a new client tenant with all 10 enterprise workflows automatically:
+### 7. Onboard New Client
+Provision a new client tenant with all enterprise workflows automatically:
 \`\`\`bash
 curl -X POST "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/clients" \\
   -H "Content-Type: application/json" \\
   -d '{"name": "Client Name", "slug": "client-slug", "plan": "enterprise", "monthlyQuota": 25000}'
 \`\`\`
 
-### 6. Platform Stats
+### 8. Platform Stats
 Check overall system metrics across all clients:
 \`\`\`bash
 curl -s "https://ai-n8n-engineer-control-plane.dl-56e.workers.dev/api/v1/stats"
